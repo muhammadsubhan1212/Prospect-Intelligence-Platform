@@ -8,7 +8,6 @@ import {
   durableWriteFile,
   durableEnsureLocal,
   durableDelete,
-  toRelPath,
   localAbs,
   blobEnabled,
 } from "./durable-store";
@@ -79,13 +78,63 @@ type IndexFile = {
 
 const INDEX_REL = "index.json";
 
+/** Serialize index mutations on this instance (void updateReport races were clobbering docxPath). */
+let indexChain: Promise<unknown> = Promise.resolve();
+
+function withIndexLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = indexChain.then(fn, fn);
+  indexChain = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
 async function loadIndex(): Promise<IndexFile> {
   ensureDirs();
   return durableReadJson<IndexFile>(INDEX_REL, { reports: [], batches: [] });
 }
 
-async function saveIndex(index: IndexFile) {
-  await durableWriteJson(INDEX_REL, index);
+/** Prefer newer updatedAt; never drop a report/batch that only exists on one side. */
+function mergeIndex(remote: IndexFile, local: IndexFile): IndexFile {
+  const reports = new Map<string, ReportRecord>();
+  for (const r of remote.reports) reports.set(r.id, r);
+  for (const r of local.reports) {
+    const prev = reports.get(r.id);
+    if (!prev || new Date(r.updatedAt).getTime() >= new Date(prev.updatedAt).getTime()) {
+      reports.set(r.id, r);
+    }
+  }
+  const batches = new Map<string, BatchRecord>();
+  for (const b of remote.batches) batches.set(b.id, b);
+  for (const b of local.batches) {
+    const prev = batches.get(b.id);
+    if (!prev || new Date(b.updatedAt).getTime() >= new Date(prev.updatedAt).getTime()) {
+      batches.set(b.id, b);
+    }
+  }
+  return {
+    reports: [...reports.values()].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    ),
+    batches: [...batches.values()].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    ),
+  };
+}
+
+async function saveIndex(index: IndexFile, opts?: { dropReportIds?: string[] }) {
+  // Re-read Blob before write so a parallel generate on another instance isn't wiped.
+  const remote = await durableReadJson<IndexFile>(INDEX_REL, { reports: [], batches: [] });
+  const merged = mergeIndex(remote, index);
+  if (opts?.dropReportIds?.length) {
+    const drop = new Set(opts.dropReportIds);
+    merged.reports = merged.reports.filter((r) => !drop.has(r.id));
+    for (const batch of merged.batches) {
+      batch.reportIds = batch.reportIds.filter((rid) => !drop.has(rid));
+    }
+  }
+  await durableWriteJson(INDEX_REL, merged);
 }
 
 export async function getDashboardStats() {
@@ -138,49 +187,75 @@ export async function getReportJson(id: string): Promise<ProspectData | null> {
 
 export async function getReportDocxBuffer(id: string): Promise<{ buffer: Buffer; filename: string } | null> {
   const report = await getReport(id);
-  if (!report?.docxPath) return null;
-  const local = await durableEnsureLocal(report.docxPath);
-  if (!local) return null;
-  return { buffer: fs.readFileSync(local), filename: path.basename(local) };
+  const candidates = [report?.docxPath, `reports/${id}.docx`].filter(Boolean) as string[];
+  for (const rel of candidates) {
+    const local = await durableEnsureLocal(rel);
+    if (!local || !fs.existsSync(local)) continue;
+    return { buffer: fs.readFileSync(local), filename: path.basename(local) };
+  }
+  return null;
 }
 
 export async function deleteReport(id: string) {
-  const index = await loadIndex();
-  const report = index.reports.find((r) => r.id === id);
-  if (!report) return false;
-  if (report.docxPath) await durableDelete(report.docxPath);
-  if (report.jsonPath) await durableDelete(report.jsonPath);
-  index.reports = index.reports.filter((r) => r.id !== id);
-  for (const batch of index.batches) {
-    batch.reportIds = batch.reportIds.filter((rid) => rid !== id);
-  }
-  await saveIndex(index);
-  appendLog("app", `Deleted report ${id}`);
-  return true;
+  return withIndexLock(async () => {
+    const index = await loadIndex();
+    const report = index.reports.find((r) => r.id === id);
+    if (!report) return false;
+    if (report.docxPath) await durableDelete(report.docxPath);
+    if (report.jsonPath) await durableDelete(report.jsonPath);
+    // Also try the stable key used by newer builds.
+    await durableDelete(`reports/${id}.docx`);
+    await durableDelete(`json/${id}.json`);
+    index.reports = index.reports.filter((r) => r.id !== id);
+    for (const batch of index.batches) {
+      batch.reportIds = batch.reportIds.filter((rid) => rid !== id);
+    }
+    await saveIndex(index, { dropReportIds: [id] });
+    appendLog("app", `Deleted report ${id}`);
+    return true;
+  });
 }
 
 async function updateReport(id: string, patch: Partial<ReportRecord>) {
-  const index = await loadIndex();
-  const i = index.reports.findIndex((r) => r.id === id);
-  if (i < 0) return;
-  index.reports[i] = { ...index.reports[i], ...patch, updatedAt: new Date().toISOString() };
-  const batch = index.batches.find((b) => b.id === index.reports[i].batchId);
-  if (batch) {
-    const kids = index.reports.filter((r) => r.batchId === batch.id);
-    batch.completed = kids.filter((r) => r.status === "completed").length;
-    batch.failed = kids.filter((r) => r.status === "failed").length;
-    batch.processing = kids.filter((r) => r.status === "processing").length;
-    batch.queued = kids.filter((r) => r.status === "queued").length;
-    if (batch.completed + batch.failed >= batch.total) {
-      if (batch.failed && batch.completed === 0) batch.status = "failed";
-      else if (batch.processing || batch.queued) batch.status = "processing";
-      else batch.status = "completed";
-    } else if (batch.processing > 0 || batch.completed > 0 || batch.failed > 0) {
-      batch.status = "processing";
+  await withIndexLock(async () => {
+    const index = await loadIndex();
+    const i = index.reports.findIndex((r) => r.id === id);
+    if (i < 0) return;
+    const prev = index.reports[i];
+    // Never let a stale progress patch wipe terminal state / file paths.
+    if (
+      (prev.status === "completed" || prev.status === "failed") &&
+      patch.status &&
+      patch.status !== "completed" &&
+      patch.status !== "failed"
+    ) {
+      return;
     }
-    batch.updatedAt = new Date().toISOString();
-  }
-  await saveIndex(index);
+    index.reports[i] = {
+      ...prev,
+      ...patch,
+      docxPath: patch.docxPath ?? prev.docxPath,
+      jsonPath: patch.jsonPath ?? prev.jsonPath,
+      updatedAt: new Date().toISOString(),
+    };
+    const batch = index.batches.find((b) => b.id === index.reports[i].batchId);
+    if (batch) {
+      const kids = index.reports.filter((r) => r.batchId === batch.id);
+      batch.completed = kids.filter((r) => r.status === "completed").length;
+      batch.failed = kids.filter((r) => r.status === "failed").length;
+      batch.processing = kids.filter((r) => r.status === "processing").length;
+      batch.queued = kids.filter((r) => r.status === "queued").length;
+      if (batch.completed + batch.failed >= batch.total) {
+        if (batch.failed && batch.completed === 0) batch.status = "failed";
+        else if (batch.processing || batch.queued) batch.status = "processing";
+        else batch.status = "completed";
+      } else if (batch.processing > 0 || batch.completed > 0 || batch.failed > 0) {
+        batch.status = "processing";
+      }
+      batch.updatedAt = new Date().toISOString();
+    }
+    await saveIndex(index);
+  });
 }
 
 function resolveLeads(
@@ -297,10 +372,12 @@ export async function createBatchJob(input: {
     reportIds,
   };
 
-  const index = await loadIndex();
-  index.batches.unshift(batch);
-  index.reports.unshift(...reports);
-  await saveIndex(index);
+  await withIndexLock(async () => {
+    const index = await loadIndex();
+    index.batches.unshift(batch);
+    index.reports.unshift(...reports);
+    await saveIndex(index);
+  });
 
   const jobsRel = `jobs/${batchId}.leads.json`;
   await durableWriteJson(jobsRel, { leads, reportIds });
@@ -365,48 +442,31 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
 
   try {
     const timeout = batch.options.timeout || 12000;
+    // Do not write the shared index on every progress tick — those races were
+    // overwriting completed+docxPath (and could wipe sibling reports on Blob).
     const result = await engine.processLead(lead, {
       timeout,
       outDir: PATHS.reports(),
       jsonDir: PATHS.json(),
       saveJson: batch.options.saveJson !== false,
-      onProgress: (stage, message) => {
-        const progressMap: Record<string, number> = {
-          researching: 35,
-          analyzing: 65,
-          generating: 85,
-          completed: 100,
-        };
-        void updateReport(next.id, {
-          stage,
-          message,
-          progress: progressMap[stage] ?? 50,
-        });
-      },
+      onProgress: () => undefined,
     });
 
     const data = result.data;
-    let resolvedJson = (data as { _jsonPath?: string })._jsonPath;
-    if (!resolvedJson || !fs.existsSync(resolvedJson)) {
-      const candidate = path.join(
-        PATHS.json(),
-        `${(lead.company || "Prospect").replace(/[^a-z0-9]+/gi, "_")}_prospect_data.json`
-      );
-      if (fs.existsSync(candidate)) resolvedJson = candidate;
-    }
-
     const jsonRel = `json/${next.id}.json`;
     await durableWriteFile(jsonRel, JSON.stringify(data, null, 2), "application/json; charset=utf-8");
 
+    // Stable Blob key (company filename varies / is unsafe as the only key).
+    const docxRel = `reports/${next.id}.docx`;
     const docxAbs = result.outPath;
-    const docxRel = toRelPath(docxAbs);
-    if (fs.existsSync(docxAbs)) {
-      const docxBuf = fs.readFileSync(docxAbs);
+    if (docxAbs && fs.existsSync(docxAbs)) {
       await durableWriteFile(
         docxRel,
-        docxBuf,
+        fs.readFileSync(docxAbs),
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       );
+    } else {
+      throw new Error("DOCX was not produced by the report engine");
     }
 
     await updateReport(next.id, {
@@ -423,7 +483,7 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
       verdict: data.finalRecommendation?.verdict || data.executiveSummary?.verdict,
     });
 
-    appendLog("jobs", `Report ${next.id} completed → ${path.basename(docxAbs)}`);
+    appendLog("jobs", `Report ${next.id} completed → ${docxRel}`);
     return { done: false, reportId: next.id };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
@@ -444,13 +504,15 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
 }
 
 export async function runBatch(batchId: string) {
-  const idx = await loadIndex();
-  const bi = idx.batches.findIndex((b) => b.id === batchId);
-  if (bi >= 0) {
-    idx.batches[bi].status = "processing";
-    idx.batches[bi].updatedAt = new Date().toISOString();
-    await saveIndex(idx);
-  }
+  await withIndexLock(async () => {
+    const idx = await loadIndex();
+    const bi = idx.batches.findIndex((b) => b.id === batchId);
+    if (bi >= 0) {
+      idx.batches[bi].status = "processing";
+      idx.batches[bi].updatedAt = new Date().toISOString();
+      await saveIndex(idx);
+    }
+  });
 
   let guard = 0;
   while (guard < 10_000) {
