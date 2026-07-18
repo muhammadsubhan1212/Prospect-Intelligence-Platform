@@ -7,9 +7,9 @@ import { formatDate } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
-export default function DashboardPage() {
-  const stats = getDashboardStats();
-  const { items } = listReports({ pageSize: 8 });
+export default async function DashboardPage() {
+  const stats = await getDashboardStats();
+  const { items } = await listReports({ pageSize: 8 });
 
   const cards = [
     { label: "Total Reports", value: stats.total, icon: Files, tone: "text-foreground" },

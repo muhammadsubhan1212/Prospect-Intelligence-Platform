@@ -1,6 +1,5 @@
-import fs from "fs";
 import mammoth from "mammoth";
-import { getReport } from "./report-service";
+import { getReport, getReportDocxBuffer } from "./report-service";
 
 /**
  * Convert the generated .docx into HTML for an in-browser Word/PDF-like preview.
@@ -11,15 +10,15 @@ export async function renderReportDocxAsHtml(reportId: string): Promise<{
   messages: string[];
   filename: string;
 }> {
-  const report = getReport(reportId);
+  const report = await getReport(reportId);
   if (!report) throw new Error("Report not found");
-  if (!report.docxPath || !fs.existsSync(report.docxPath)) {
+  const file = await getReportDocxBuffer(reportId);
+  if (!file) {
     throw new Error("DOCX not available for this report — generate or re-run first.");
   }
 
-  const buffer = fs.readFileSync(report.docxPath);
   const result = await mammoth.convertToHtml(
-    { buffer },
+    { buffer: file.buffer },
     {
       styleMap: [
         "p[style-name='Heading 1'] => h1.doc-h1:fresh",
@@ -32,6 +31,6 @@ export async function renderReportDocxAsHtml(reportId: string): Promise<{
   return {
     html: result.value,
     messages: (result.messages || []).map((m) => m.message),
-    filename: report.docxPath.split(/[/\\]/).pop() || "report.docx",
+    filename: file.filename,
   };
 }

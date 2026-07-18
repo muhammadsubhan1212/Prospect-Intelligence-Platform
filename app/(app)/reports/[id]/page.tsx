@@ -12,9 +12,9 @@ type Props = { params: Promise<{ id: string }> };
 
 export default async function ReportDetailPage({ params }: Props) {
   const { id } = await params;
-  const report = getReport(id);
+  const report = await getReport(id);
   if (!report) notFound();
-  const data = getReportJson(id);
+  const data = await getReportJson(id);
 
   const exec = data?.executiveSummary;
   const offer = data?.bestFirstOffer;

@@ -17,6 +17,12 @@ import {
   truncateCsvFile,
   type NewReportSession,
 } from "@/lib/new-report-session";
+import {
+  deleteCsvText,
+  loadCsvText,
+  paginateClient,
+  saveCsvText,
+} from "@/lib/csv-workspace";
 
 type UploadMeta = {
   id: string;
@@ -66,12 +72,25 @@ function NewReportInner() {
   const [company, setCompany] = useState("");
   const [timeoutMs, setTimeoutMs] = useState("12000");
   const [generating, setGenerating] = useState(false);
+  const [csvFile, setCsvFile] = useState<File | null>(null);
   const [largePrompt, setLargePrompt] = useState<LargePrompt | null>(null);
 
   const fetchPage = useCallback(
     async (uploadId: string, nextPage: number, nextSize: number, q: string) => {
       setLoadingPage(true);
+      setError("");
       try {
+        const local = await loadCsvText(uploadId);
+        if (local?.text) {
+          const pageData = paginateClient(local.text, { page: nextPage, pageSize: nextSize, q });
+          setRows(pageData.mappedPreview as MappedRow[]);
+          setPage(pageData.page);
+          setPageSize(pageData.pageSize);
+          setTotalRows(pageData.totalRows);
+          setTotalPages(pageData.totalPages);
+          return;
+        }
+
         const params = new URLSearchParams({
           id: uploadId,
           page: String(nextPage),
@@ -118,25 +137,18 @@ function NewReportInner() {
         return;
       }
       try {
-        const params = new URLSearchParams({
-          id: saved.uploadId,
-          page: "1",
-          pageSize: "20",
-        });
-        const res = await fetch(`/api/csv/preview?${params}`);
-        const json = await res.json();
-        if (!res.ok) {
-          clearNewReportSession();
-          if (!cancelled) setRestoring(false);
-          return;
-        }
-        if (cancelled) return;
-        applyUploadMeta(json.upload, saved);
-        setRows(json.mappedPreview || []);
-        setPage(json.page || 1);
-        setPageSize(json.pageSize || 20);
-        setTotalRows(json.totalRows ?? json.upload.rowCount);
-        setTotalPages(json.totalPages || 1);
+        applyUploadMeta(
+          {
+            id: saved.uploadId,
+            filename: saved.filename,
+            size: saved.size,
+            rowCount: saved.rowCount,
+            headers: saved.headers,
+            truncated: saved.truncated,
+            originalRowCount: saved.originalRowCount,
+          },
+          saved
+        );
         setMode(saved.mode);
         setRow(saved.row);
         setRowFrom(saved.rowFrom);
@@ -145,6 +157,15 @@ function NewReportInner() {
         setEmail(saved.email);
         setCompany(saved.company);
         setTimeoutMs(saved.timeoutMs);
+
+        const local = await loadCsvText(saved.uploadId);
+        if (local?.text) {
+          setCsvFile(new File([local.text], saved.filename, { type: "text/csv" }));
+          if (!cancelled) await fetchPage(saved.uploadId, 1, 20, "");
+        } else {
+          // Server preview may work when Blob is connected
+          if (!cancelled) await fetchPage(saved.uploadId, 1, 20, "");
+        }
       } catch {
         clearNewReportSession();
       } finally {
@@ -154,7 +175,7 @@ function NewReportInner() {
     return () => {
       cancelled = true;
     };
-  }, [applyUploadMeta]);
+  }, [applyUploadMeta, fetchPage]);
 
   useEffect(() => {
     if (restoring || !upload) return;
@@ -194,12 +215,15 @@ function NewReportInner() {
           );
         }
 
+        const text = await toSend.text();
         const form = new FormData();
         form.append("file", toSend);
         if (maxRows != null) form.append("maxRows", String(maxRows));
         const res = await fetch("/api/csv/upload", { method: "POST", body: form });
         if (!res.ok) throw new Error(await readUploadError(res));
         const json = await res.json();
+        await saveCsvText(json.upload.id, json.upload.filename, text);
+        setCsvFile(toSend);
         applyUploadMeta(json.upload);
         setRow("1");
         setRowFrom("1");
@@ -208,16 +232,21 @@ function NewReportInner() {
         setSearchInput("");
         setPage(1);
         setPageSize(20);
-        await fetchPage(json.upload.id, 1, 20, "");
+        // Prefer browser pagination (survives Vercel multi-instance /tmp)
+        const pageData = paginateClient(text, { page: 1, pageSize: 20, q: "" });
+        setRows(pageData.mappedPreview as MappedRow[]);
+        setTotalRows(pageData.totalRows);
+        setTotalPages(pageData.totalPages);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         setUpload(null);
         setRows([]);
+        setCsvFile(null);
       } finally {
         setUploading(false);
       }
     },
-    [applyUploadMeta, fetchPage]
+    [applyUploadMeta]
   );
 
   const onFile = useCallback(
@@ -244,6 +273,7 @@ function NewReportInner() {
     clearNewReportSession();
     setUpload(null);
     setRows([]);
+    setCsvFile(null);
     setError("");
     setLargePrompt(null);
     setSearchQ("");
@@ -257,6 +287,7 @@ function NewReportInner() {
     setCompany("");
     if (id) {
       try {
+        await deleteCsvText(id);
         await fetch(`/api/csv/${id}`, { method: "DELETE" });
       } catch {
         /* ignore */
@@ -292,16 +323,40 @@ function NewReportInner() {
     if (mode === "company") options.company = company;
 
     try {
-      const res = await fetch("/api/report/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uploadId: upload.id, options }),
-      });
+      // Re-send CSV in the same request so generation does not depend on another instance's /tmp
+      let file = csvFile;
+      if (!file) {
+        const local = await loadCsvText(upload.id);
+        if (local?.text) file = new File([local.text], upload.filename, { type: "text/csv" });
+      }
+
+      let res: Response;
+      if (file) {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("uploadId", upload.id);
+        form.append("options", JSON.stringify(options));
+        res = await fetch("/api/report/generate", { method: "POST", body: form });
+      } else {
+        res = await fetch("/api/report/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ uploadId: upload.id, options }),
+        });
+      }
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Generate failed");
-      router.push(`/reports/processing/${json.batch.id}`);
+      if (json.batch?.id) {
+        try {
+          sessionStorage.setItem(`prospect_batch_${json.batch.id}`, JSON.stringify(json));
+        } catch {
+          /* ignore quota */
+        }
+        router.push(`/reports/processing/${json.batch.id}`);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
       setGenerating(false);
     }
   }

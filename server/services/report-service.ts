@@ -1,7 +1,17 @@
 import fs from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
-import { PATHS, ensureDirs, readJsonFile, writeJsonFile, appendLog } from "./paths";
+import { PATHS, ensureDirs, appendLog } from "./paths";
+import {
+  durableReadJson,
+  durableWriteJson,
+  durableWriteFile,
+  durableEnsureLocal,
+  durableDelete,
+  toRelPath,
+  localAbs,
+  blobEnabled,
+} from "./durable-store";
 import { engine, type Lead, type ProspectData } from "./engine";
 
 export type ReportStatus = "queued" | "processing" | "completed" | "failed";
@@ -67,17 +77,19 @@ type IndexFile = {
   batches: BatchRecord[];
 };
 
-function loadIndex(): IndexFile {
+const INDEX_REL = "index.json";
+
+async function loadIndex(): Promise<IndexFile> {
   ensureDirs();
-  return readJsonFile<IndexFile>(PATHS.index(), { reports: [], batches: [] });
+  return durableReadJson<IndexFile>(INDEX_REL, { reports: [], batches: [] });
 }
 
-function saveIndex(index: IndexFile) {
-  writeJsonFile(PATHS.index(), index);
+async function saveIndex(index: IndexFile) {
+  await durableWriteJson(INDEX_REL, index);
 }
 
-export function getDashboardStats() {
-  const { reports } = loadIndex();
+export async function getDashboardStats() {
+  const { reports } = await loadIndex();
   return {
     total: reports.length,
     queued: reports.filter((r) => r.status === "queued").length,
@@ -87,11 +99,11 @@ export function getDashboardStats() {
   };
 }
 
-export function listReports(opts?: { q?: string; page?: number; pageSize?: number }) {
+export async function listReports(opts?: { q?: string; page?: number; pageSize?: number }) {
   const q = (opts?.q || "").toLowerCase().trim();
   const page = Math.max(1, opts?.page || 1);
   const pageSize = Math.min(100, Math.max(1, opts?.pageSize || 20));
-  let items = [...loadIndex().reports].sort(
+  let items = [...(await loadIndex()).reports].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
   if (q) {
@@ -108,37 +120,47 @@ export function listReports(opts?: { q?: string; page?: number; pageSize?: numbe
   return { items: items.slice(start, start + pageSize), total, page, pageSize };
 }
 
-export function getReport(id: string) {
-  return loadIndex().reports.find((r) => r.id === id) || null;
+export async function getReport(id: string) {
+  return (await loadIndex()).reports.find((r) => r.id === id) || null;
 }
 
-export function getBatch(id: string) {
-  return loadIndex().batches.find((b) => b.id === id) || null;
+export async function getBatch(id: string) {
+  return (await loadIndex()).batches.find((b) => b.id === id) || null;
 }
 
-export function getReportJson(id: string): ProspectData | null {
-  const report = getReport(id);
-  if (!report?.jsonPath || !fs.existsSync(report.jsonPath)) return null;
-  return JSON.parse(fs.readFileSync(report.jsonPath, "utf8")) as ProspectData;
+export async function getReportJson(id: string): Promise<ProspectData | null> {
+  const report = await getReport(id);
+  if (!report?.jsonPath) return null;
+  const local = await durableEnsureLocal(report.jsonPath);
+  if (!local) return null;
+  return JSON.parse(fs.readFileSync(local, "utf8")) as ProspectData;
 }
 
-export function deleteReport(id: string) {
-  const index = loadIndex();
+export async function getReportDocxBuffer(id: string): Promise<{ buffer: Buffer; filename: string } | null> {
+  const report = await getReport(id);
+  if (!report?.docxPath) return null;
+  const local = await durableEnsureLocal(report.docxPath);
+  if (!local) return null;
+  return { buffer: fs.readFileSync(local), filename: path.basename(local) };
+}
+
+export async function deleteReport(id: string) {
+  const index = await loadIndex();
   const report = index.reports.find((r) => r.id === id);
   if (!report) return false;
-  if (report.docxPath && fs.existsSync(report.docxPath)) fs.unlinkSync(report.docxPath);
-  if (report.jsonPath && fs.existsSync(report.jsonPath)) fs.unlinkSync(report.jsonPath);
+  if (report.docxPath) await durableDelete(report.docxPath);
+  if (report.jsonPath) await durableDelete(report.jsonPath);
   index.reports = index.reports.filter((r) => r.id !== id);
   for (const batch of index.batches) {
     batch.reportIds = batch.reportIds.filter((rid) => rid !== id);
   }
-  saveIndex(index);
+  await saveIndex(index);
   appendLog("app", `Deleted report ${id}`);
   return true;
 }
 
-function updateReport(id: string, patch: Partial<ReportRecord>) {
-  const index = loadIndex();
+async function updateReport(id: string, patch: Partial<ReportRecord>) {
+  const index = await loadIndex();
   const i = index.reports.findIndex((r) => r.id === id);
   if (i < 0) return;
   index.reports[i] = { ...index.reports[i], ...patch, updatedAt: new Date().toISOString() };
@@ -150,7 +172,6 @@ function updateReport(id: string, patch: Partial<ReportRecord>) {
     batch.processing = kids.filter((r) => r.status === "processing").length;
     batch.queued = kids.filter((r) => r.status === "queued").length;
     if (batch.completed + batch.failed >= batch.total) {
-      batch.status = batch.failed && !batch.completed ? "failed" : batch.failed ? "completed" : "completed";
       if (batch.failed && batch.completed === 0) batch.status = "failed";
       else if (batch.processing || batch.queued) batch.status = "processing";
       else batch.status = "completed";
@@ -159,7 +180,7 @@ function updateReport(id: string, patch: Partial<ReportRecord>) {
     }
     batch.updatedAt = new Date().toISOString();
   }
-  saveIndex(index);
+  await saveIndex(index);
 }
 
 function resolveLeads(
@@ -206,7 +227,6 @@ function resolveLeads(
     return { leads, rowIndexes };
   }
 
-  // --all (default when no row selector)
   const limit = options.limit ? Math.min(options.limit, records.length) : records.length;
   for (let i = 0; i < limit; i++) {
     leads.push(engine.mapRecordToLead(records[i], headers));
@@ -215,7 +235,7 @@ function resolveLeads(
   return { leads, rowIndexes };
 }
 
-export function createBatchJob(input: {
+export async function createBatchJob(input: {
   csvUploadId: string;
   filename: string;
   csvPath: string;
@@ -277,21 +297,23 @@ export function createBatchJob(input: {
     reportIds,
   };
 
-  const index = loadIndex();
+  const index = await loadIndex();
   index.batches.unshift(batch);
   index.reports.unshift(...reports);
-  saveIndex(index);
+  await saveIndex(index);
 
-  // Persist lead payloads for the worker (avoid re-parsing mid-job drift)
-  writeJsonFile(path.join(PATHS.jobs(), `${batchId}.leads.json`), { leads, reportIds });
+  const jobsRel = `jobs/${batchId}.leads.json`;
+  await durableWriteJson(jobsRel, { leads, reportIds });
 
-  appendLog("jobs", `Batch ${batchId} created with ${leads.length} report(s)`);
+  appendLog(
+    "jobs",
+    `Batch ${batchId} created with ${leads.length} report(s)${blobEnabled() ? " [blob]" : ""}`
+  );
   return { batch, reports };
 }
 
-/** Process one queued report inside a batch. Safe to call repeatedly. */
 export async function processNextInBatch(batchId: string): Promise<{ done: boolean; reportId?: string }> {
-  const index = loadIndex();
+  const index = await loadIndex();
   const batch = index.batches.find((b) => b.id === batchId);
   if (!batch) return { done: true };
 
@@ -301,30 +323,30 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
       (r) => r.batchId === batchId && r.status === "processing"
     );
     if (!stillProcessing) {
-      updateReport(batch.reportIds[0], {}); // refresh batch rollup via side effect if needed
-      const b = getBatch(batchId);
+      const b = await getBatch(batchId);
       if (b && b.status !== "completed" && b.queued === 0 && b.processing === 0) {
-        const idx = loadIndex();
+        const idx = await loadIndex();
         const bi = idx.batches.findIndex((x) => x.id === batchId);
         if (bi >= 0) {
-          idx.batches[bi].status = idx.batches[bi].failed && !idx.batches[bi].completed ? "failed" : "completed";
+          idx.batches[bi].status =
+            idx.batches[bi].failed && !idx.batches[bi].completed ? "failed" : "completed";
           idx.batches[bi].updatedAt = new Date().toISOString();
-          saveIndex(idx);
+          await saveIndex(idx);
         }
       }
     }
     return { done: true };
   }
 
-  const leadsFile = path.join(PATHS.jobs(), `${batchId}.leads.json`);
-  const payload = readJsonFile<{ leads: Lead[]; reportIds: string[] }>(leadsFile, {
-    leads: [],
-    reportIds: [],
-  });
+  const jobsRel = `jobs/${batchId}.leads.json`;
+  const localJobs = await durableEnsureLocal(jobsRel);
+  const payload = localJobs
+    ? (JSON.parse(fs.readFileSync(localJobs, "utf8")) as { leads: Lead[]; reportIds: string[] })
+    : { leads: [] as Lead[], reportIds: [] as string[] };
   const leadIndex = payload.reportIds.indexOf(next.id);
   const lead = payload.leads[leadIndex];
   if (!lead) {
-    updateReport(next.id, {
+    await updateReport(next.id, {
       status: "failed",
       stage: "failed",
       message: "Lead payload missing",
@@ -334,7 +356,7 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
     return { done: false, reportId: next.id };
   }
 
-  updateReport(next.id, {
+  await updateReport(next.id, {
     status: "processing",
     stage: "researching",
     message: "Researching company...",
@@ -355,7 +377,7 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
           generating: 85,
           completed: 100,
         };
-        updateReport(next.id, {
+        void updateReport(next.id, {
           stage,
           message,
           progress: progressMap[stage] ?? 50,
@@ -364,11 +386,6 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
     });
 
     const data = result.data;
-    const jsonPath =
-      (data as { _jsonPath?: string })._jsonPath ||
-      path.join(PATHS.json(), path.basename(result.outPath).replace(/\.docx$/i, "") + "_prospect_data.json");
-
-    // pipeline already wrote JSON with company-based name; locate it
     let resolvedJson = (data as { _jsonPath?: string })._jsonPath;
     if (!resolvedJson || !fs.existsSync(resolvedJson)) {
       const candidate = path.join(
@@ -378,17 +395,27 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
       if (fs.existsSync(candidate)) resolvedJson = candidate;
     }
 
-    // Prefer unique per-report JSON to avoid collisions on same company
-    const uniqueJson = path.join(PATHS.json(), `${next.id}.json`);
-    fs.writeFileSync(uniqueJson, JSON.stringify(data, null, 2));
+    const jsonRel = `json/${next.id}.json`;
+    await durableWriteFile(jsonRel, JSON.stringify(data, null, 2), "application/json; charset=utf-8");
 
-    updateReport(next.id, {
+    const docxAbs = result.outPath;
+    const docxRel = toRelPath(docxAbs);
+    if (fs.existsSync(docxAbs)) {
+      const docxBuf = fs.readFileSync(docxAbs);
+      await durableWriteFile(
+        docxRel,
+        docxBuf,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      );
+    }
+
+    await updateReport(next.id, {
       status: "completed",
       stage: "completed",
       message: "Completed",
       progress: 100,
-      docxPath: result.outPath,
-      jsonPath: uniqueJson,
+      docxPath: docxRel,
+      jsonPath: jsonRel,
       websiteScore: result.analysis.overallScore,
       firstOffer: result.strat.best.name,
       priority: result.strat.priority,
@@ -396,14 +423,14 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
       verdict: data.finalRecommendation?.verdict || data.executiveSummary?.verdict,
     });
 
-    appendLog("jobs", `Report ${next.id} completed → ${path.basename(result.outPath)}`);
+    appendLog("jobs", `Report ${next.id} completed → ${path.basename(docxAbs)}`);
     return { done: false, reportId: next.id };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     const stack = err instanceof Error ? err.stack : undefined;
     const code = err && typeof err === "object" && "code" in err ? String((err as { code?: string }).code) : "";
     const incomplete = code === "INCOMPLETE_RESEARCH" || /incomplete research/i.test(error);
-    updateReport(next.id, {
+    await updateReport(next.id, {
       status: "failed",
       stage: incomplete ? "incomplete_research" : "failed",
       message: incomplete ? "Incomplete research — website could not be loaded" : error,
@@ -416,15 +443,13 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
   }
 }
 
-/** Drain an entire batch sequentially (used by background worker). */
 export async function runBatch(batchId: string) {
-  // mark batch processing
-  const idx = loadIndex();
+  const idx = await loadIndex();
   const bi = idx.batches.findIndex((b) => b.id === batchId);
   if (bi >= 0) {
     idx.batches[bi].status = "processing";
     idx.batches[bi].updatedAt = new Date().toISOString();
-    saveIndex(idx);
+    await saveIndex(idx);
   }
 
   let guard = 0;
@@ -433,4 +458,9 @@ export async function runBatch(batchId: string) {
     const { done } = await processNextInBatch(batchId);
     if (done) break;
   }
+}
+
+/** @deprecated local helper kept for typing */
+export function _localAbsReports() {
+  return localAbs("reports");
 }

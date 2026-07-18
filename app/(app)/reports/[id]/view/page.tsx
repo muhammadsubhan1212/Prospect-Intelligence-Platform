@@ -11,9 +11,9 @@ type Props = { params: Promise<{ id: string }> };
 
 export default async function ReportViewPage({ params }: Props) {
   const { id } = await params;
-  const report = getReport(id);
+  const report = await getReport(id);
   if (!report) notFound();
-  const data = getReportJson(id);
+  const data = await getReportJson(id);
   if (!data) {
     return (
       <div className="space-y-4">

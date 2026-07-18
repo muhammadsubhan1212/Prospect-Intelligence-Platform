@@ -35,6 +35,8 @@ export default function ProcessingPage() {
 
   useEffect(() => {
     let alive = true;
+    let t: ReturnType<typeof setInterval> | undefined;
+
     async function tick() {
       const res = await fetch(`/api/reports?batchId=${params.id}`);
       if (!res.ok) return;
@@ -42,12 +44,33 @@ export default function ProcessingPage() {
       if (!alive) return;
       setBatch(json.batch);
       setReports(json.reports || []);
+      if (json.batch?.status === "completed" || json.batch?.status === "failed") {
+        if (t) clearInterval(t);
+      }
     }
+
+    try {
+      const cached = sessionStorage.getItem(`prospect_batch_${params.id}`);
+      if (cached) {
+        const json = JSON.parse(cached);
+        setBatch(json.batch);
+        setReports(json.reports || []);
+        if (json.inline || json.batch?.status === "completed" || json.batch?.status === "failed") {
+          // Finished in one request — no need to poll a different instance
+          return () => {
+            alive = false;
+          };
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+
     tick();
-    const t = setInterval(tick, 2500);
+    t = setInterval(tick, 2500);
     return () => {
       alive = false;
-      clearInterval(t);
+      if (t) clearInterval(t);
     };
   }, [params.id]);
 

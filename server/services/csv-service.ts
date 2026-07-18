@@ -1,7 +1,14 @@
-import fs from "fs";
-import path from "path";
 import { randomUUID } from "crypto";
-import { PATHS, ensureDirs, writeJsonFile, readJsonFile, appendLog } from "./paths";
+import {
+  durableWriteFile,
+  durableReadJson,
+  durableWriteJson,
+  durableEnsureLocal,
+  durableDelete,
+  localAbs,
+  blobEnabled,
+} from "./durable-store";
+import { appendLog, ensureDirs } from "./paths";
 import { engine, type Lead } from "./engine";
 
 export type CsvUpload = {
@@ -11,10 +18,9 @@ export type CsvUpload = {
   rowCount: number;
   headers: string[];
   createdAt: string;
+  /** Relative path under storage root (e.g. uploads/id_file.csv) */
   path: string;
-  /** True when the stored file was capped (e.g. first 1000 rows). */
   truncated?: boolean;
-  /** Row count of the original file before truncation (if known). */
   originalRowCount?: number;
 };
 
@@ -26,33 +32,27 @@ export type CsvPreview = {
 
 export const LARGE_CSV_ROW_THRESHOLD = 1000;
 
-const META_FILE = () => path.join(PATHS.uploads(), "uploads.json");
+const META_REL = "uploads/uploads.json";
 
-function loadUploads(): CsvUpload[] {
-  return readJsonFile<CsvUpload[]>(META_FILE(), []);
+async function loadUploads(): Promise<CsvUpload[]> {
+  return durableReadJson<CsvUpload[]>(META_REL, []);
 }
 
-function saveUploads(list: CsvUpload[]) {
-  writeJsonFile(META_FILE(), list);
+async function saveUploads(list: CsvUpload[]) {
+  await durableWriteJson(META_REL, list);
 }
 
-export function getUpload(id: string) {
-  return loadUploads().find((u) => u.id === id) || null;
+export async function getUpload(id: string) {
+  return (await loadUploads()).find((u) => u.id === id) || null;
 }
 
-export function deleteUpload(id: string) {
+export async function deleteUpload(id: string) {
   ensureDirs();
-  const list = loadUploads();
+  const list = await loadUploads();
   const upload = list.find((u) => u.id === id);
   if (!upload) return false;
-  if (upload.path && fs.existsSync(upload.path)) {
-    try {
-      fs.unlinkSync(upload.path);
-    } catch {
-      /* ignore */
-    }
-  }
-  saveUploads(list.filter((u) => u.id !== id));
+  if (upload.path) await durableDelete(upload.path);
+  await saveUploads(list.filter((u) => u.id !== id));
   appendLog("uploads", `Deleted upload ${id}`);
   return true;
 }
@@ -72,9 +72,12 @@ export async function saveUploadedCsv(
   ensureDirs();
   const id = randomUUID();
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]+/g, "_");
-  const dest = path.join(PATHS.uploads(), `${id}_${safeName}`);
-  const buf = Buffer.from(await file.arrayBuffer());
-  fs.writeFileSync(dest, buf);
+  const rel = `uploads/${id}_${safeName}`;
+  let buf = Buffer.from(await file.arrayBuffer());
+
+  // Write locally first so the CSV parser can read a path
+  const dest = localAbs(rel);
+  await durableWriteFile(rel, buf, "text/csv; charset=utf-8");
 
   let { headers, records } = engine.readCSVObjects(dest);
   const originalRowCount = records.length;
@@ -93,27 +96,28 @@ export async function saveUploadedCsv(
       headers.map(escape).join(","),
       ...records.map((row) => headers.map((h) => escape(row[h] ?? "")).join(",")),
     ];
-    fs.writeFileSync(dest, lines.join("\n"), "utf8");
+    buf = Buffer.from(lines.join("\n"), "utf8");
+    await durableWriteFile(rel, buf, "text/csv; charset=utf-8");
   }
 
   const upload: CsvUpload = {
     id,
     filename: file.name,
-    size: truncated ? fs.statSync(dest).size : file.size || buf.length,
+    size: truncated ? buf.length : file.size || buf.length,
     rowCount: records.length,
     headers,
     createdAt: new Date().toISOString(),
-    path: dest,
+    path: rel,
     truncated,
     originalRowCount: truncated ? originalRowCount : undefined,
   };
 
-  const list = loadUploads();
+  const list = await loadUploads();
   list.unshift(upload);
-  saveUploads(list.slice(0, 200));
+  await saveUploads(list.slice(0, 200));
   appendLog(
     "uploads",
-    `Saved ${file.name} as ${id} (${records.length} rows${truncated ? ` of ${originalRowCount}` : ""})`
+    `Saved ${file.name} as ${id} (${records.length} rows${truncated ? ` of ${originalRowCount}` : ""}${blobEnabled() ? ", blob" : ""})`
   );
 
   const previewRows = records.slice(0, 20);
@@ -122,22 +126,29 @@ export async function saveUploadedCsv(
   return { upload, preview: previewRows, mappedPreview };
 }
 
-export function previewCsv(
+export async function resolveUploadCsvPath(uploadId: string): Promise<{ upload: CsvUpload; csvPath: string }> {
+  const upload = await getUpload(uploadId);
+  if (!upload) throw new Error("Upload not found");
+  const csvPath = await durableEnsureLocal(upload.path);
+  if (!csvPath) throw new Error("CSV file missing on disk");
+  return { upload, csvPath };
+}
+
+export async function previewCsv(
   uploadId: string,
   opts: { page?: number; pageSize?: number; limit?: number; q?: string } | number = 20
-): CsvPreview & {
-  page: number;
-  pageSize: number;
-  totalRows: number;
-  totalPages: number;
-  q: string;
-} {
-  const upload = getUpload(uploadId);
-  if (!upload) throw new Error("Upload not found");
-  if (!fs.existsSync(upload.path)) throw new Error("CSV file missing on disk");
-  const { headers, records } = engine.readCSVObjects(upload.path);
+): Promise<
+  CsvPreview & {
+    page: number;
+    pageSize: number;
+    totalRows: number;
+    totalPages: number;
+    q: string;
+  }
+> {
+  const { upload, csvPath } = await resolveUploadCsvPath(uploadId);
+  const { headers, records } = engine.readCSVObjects(csvPath);
 
-  // Back-compat: previewCsv(id, 20)
   const options =
     typeof opts === "number"
       ? { page: 1, pageSize: opts, q: "" }
