@@ -1,13 +1,9 @@
 import { NextResponse } from "next/server";
-import { getSession } from "@/server/services/auth";
 import { getBatch, getDashboardStats, listReports } from "@/server/services/report-service";
 
 export const runtime = "nodejs";
 
 export async function GET(req: Request) {
-  const session = await getSession();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
   const { searchParams } = new URL(req.url);
   const batchId = searchParams.get("batchId");
   if (batchId) {

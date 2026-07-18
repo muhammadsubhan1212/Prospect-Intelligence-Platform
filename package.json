@@ -11,12 +11,10 @@
     "engine:sample": "node server/engine/Prospect_Intelligence_Report_Generator.js server/engine/prospect_data.sample.json"
   },
   "dependencies": {
-    "bcryptjs": "^3.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "docx": "^9.7.1",
     "docx-preview": "^0.4.0",
-    "jose": "^6.2.3",
     "lucide-react": "^1.25.0",
     "mammoth": "^1.12.0",
     "next": "15.5.20",
@@ -29,7 +27,6 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
-    "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

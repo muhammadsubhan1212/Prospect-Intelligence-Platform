@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { getSession } from "@/server/services/auth";
 import { deleteReport, getReport, getReportJson } from "@/server/services/report-service";
 
 export const runtime = "nodejs";
@@ -7,8 +6,6 @@ export const runtime = "nodejs";
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function GET(_req: Request, ctx: Ctx) {
-  const session = await getSession();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { id } = await ctx.params;
   const report = getReport(id);
   if (!report) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -17,8 +14,6 @@ export async function GET(_req: Request, ctx: Ctx) {
 }
 
 export async function DELETE(_req: Request, ctx: Ctx) {
-  const session = await getSession();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { id } = await ctx.params;
   const ok = deleteReport(id);
   if (!ok) return NextResponse.json({ error: "Not found" }, { status: 404 });

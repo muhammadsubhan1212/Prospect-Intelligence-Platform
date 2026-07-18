@@ -1,16 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import {
-  LayoutDashboard,
-  FilePlus2,
-  Files,
-  Moon,
-  Sun,
-  LogOut,
-  Radar,
-} from "lucide-react";
+import { usePathname } from "next/navigation";
+import { LayoutDashboard, FilePlus2, Files, Moon, Sun, Radar } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/primitives";
 import { useEffect, useState } from "react";
@@ -23,12 +15,12 @@ const nav = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const router = useRouter();
   const [dark, setDark] = useState(false);
 
   useEffect(() => {
     const stored = localStorage.getItem("theme");
-    const preferDark = stored === "dark" || (!stored && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    const preferDark =
+      stored === "dark" || (!stored && window.matchMedia("(prefers-color-scheme: dark)").matches);
     setDark(preferDark);
     document.documentElement.classList.toggle("dark", preferDark);
   }, []);
@@ -38,12 +30,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setDark(next);
     document.documentElement.classList.toggle("dark", next);
     localStorage.setItem("theme", next ? "dark" : "light");
-  }
-
-  async function onLogout() {
-    await fetch("/api/auth", { method: "DELETE" });
-    router.push("/login");
-    router.refresh();
   }
 
   return (
@@ -78,12 +64,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               );
             })}
           </nav>
-          <div className="border-t border-white/10 p-3">
-            <Button variant="ghost" className="w-full justify-start text-white/70 hover:bg-white/5 hover:text-white" onClick={onLogout}>
-              <LogOut className="h-4 w-4" />
-              Sign out
-            </Button>
-          </div>
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col">

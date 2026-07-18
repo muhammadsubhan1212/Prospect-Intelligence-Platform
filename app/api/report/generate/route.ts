@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { after } from "next/server";
-import { getSession } from "@/server/services/auth";
 import { getUpload } from "@/server/services/csv-service";
 import { createBatchJob, runBatch, type GenerateOptions } from "@/server/services/report-service";
 
@@ -8,9 +7,6 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 export async function POST(req: Request) {
-  const session = await getSession();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
   try {
     const body = (await req.json()) as {
       uploadId: string;

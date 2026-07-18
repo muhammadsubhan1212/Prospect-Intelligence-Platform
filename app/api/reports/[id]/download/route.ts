@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
-import { getSession } from "@/server/services/auth";
 import { getReport } from "@/server/services/report-service";
 
 export const runtime = "nodejs";
@@ -9,8 +8,6 @@ export const runtime = "nodejs";
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function GET(req: Request, ctx: Ctx) {
-  const session = await getSession();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { id } = await ctx.params;
   const report = getReport(id);
   if (!report?.docxPath || !fs.existsSync(report.docxPath)) {
