@@ -2,15 +2,24 @@
  * Shared storage for local disk + Vercel Blob.
  * On Vercel, /tmp is per-instance — without Blob, upload then preview hits another machine.
  * Set BLOB_READ_WRITE_TOKEN (Vercel Storage → Blob → Connect) for durable files.
+ *
+ * Matches store access mode: private stores require access: "private" (default here).
+ * Set BLOB_ACCESS=public only if your Blob store was created as public.
  */
 
-import { put, list, del } from "@vercel/blob";
+import { put, list, del, get } from "@vercel/blob";
 import fs from "fs";
 import path from "path";
 import { storageRoot, ensureDirs } from "./paths";
 
 export function blobEnabled() {
   return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
+}
+
+type BlobAccess = "public" | "private";
+
+function blobAccess(): BlobAccess {
+  return process.env.BLOB_ACCESS === "public" ? "public" : "private";
 }
 
 function abs(rel: string) {
@@ -33,6 +42,17 @@ export function toRelPath(absoluteOrRel: string): string {
   return absoluteOrRel.replace(/^\/+/, "");
 }
 
+async function streamToBuffer(stream: ReadableStream<Uint8Array>): Promise<Buffer> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) chunks.push(value);
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c)));
+}
+
 export async function durableWriteFile(
   rel: string,
   data: Buffer | string,
@@ -45,7 +65,7 @@ export async function durableWriteFile(
 
   if (blobEnabled()) {
     await put(blobKey(rel), data, {
-      access: "public",
+      access: blobAccess(),
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType:
@@ -63,9 +83,39 @@ export async function durableReadFile(rel: string): Promise<Buffer | null> {
   if (!blobEnabled()) return null;
 
   const key = blobKey(rel);
+  const access = blobAccess();
+
+  try {
+    const result = await get(key, { access });
+    if (result?.statusCode === 200 && result.stream) {
+      const buf = await streamToBuffer(result.stream);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, buf);
+      return buf;
+    }
+  } catch {
+    /* fall through to list+fetch for older public URLs */
+  }
+
+  // Fallback: list then fetch (works for public stores; private needs get above)
   const { blobs } = await list({ prefix: key, limit: 20 });
   const hit = blobs.find((b) => b.pathname === key);
   if (!hit) return null;
+
+  if (access === "private") {
+    try {
+      const result = await get(hit.url, { access: "private" });
+      if (result?.statusCode === 200 && result.stream) {
+        const buf = await streamToBuffer(result.stream);
+        fs.mkdirSync(path.dirname(full), { recursive: true });
+        fs.writeFileSync(full, buf);
+        return buf;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
 
   const res = await fetch(hit.url);
   if (!res.ok) return null;
