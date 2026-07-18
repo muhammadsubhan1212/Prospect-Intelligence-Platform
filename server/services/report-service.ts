@@ -8,6 +8,7 @@ import {
   durableWriteFile,
   durableEnsureLocal,
   durableDelete,
+  durableListRelPaths,
   localAbs,
   blobEnabled,
 } from "./durable-store";
@@ -137,7 +138,61 @@ async function saveIndex(index: IndexFile, opts?: { dropReportIds?: string[] }) 
   await durableWriteJson(INDEX_REL, merged);
 }
 
+/**
+ * Recover reports whose .docx/.json exist in Blob but were dropped from index.json
+ * (stale /tmp overwrites). Runs under the index lock.
+ */
+async function reconcileOrphanReports(): Promise<void> {
+  if (!blobEnabled()) return;
+  await withIndexLock(async () => {
+    const index = await loadIndex();
+    const known = new Set(index.reports.map((r) => r.id));
+    const jsonPaths = await durableListRelPaths("json/");
+    let added = 0;
+    for (const rel of jsonPaths) {
+      const m = /^json\/([^/]+)\.json$/.exec(rel);
+      if (!m) continue;
+      const id = m[1];
+      if (known.has(id)) continue;
+      const data = await durableReadJson<ProspectData>(rel, {});
+      const lead = (data.lead || {}) as Lead;
+      const now = new Date().toISOString();
+      const docxRel = `reports/${id}.docx`;
+      index.reports.unshift({
+        id,
+        batchId: "recovered",
+        status: "completed",
+        createdAt: now,
+        updatedAt: now,
+        company: String(lead.company || "Recovered report"),
+        fullName: String(lead.fullName || ""),
+        email: String(lead.email || ""),
+        website: String(lead.website || data.websiteAudit?.analyzedUrl || ""),
+        industry: String(lead.industry || ""),
+        linkedin: String(lead.linkedin || ""),
+        stage: "completed",
+        message: "Recovered from Blob storage",
+        progress: 100,
+        websiteScore: data.websiteAudit?.overallScore,
+        firstOffer: data.bestFirstOffer?.offer,
+        priority: data.finalRecommendation?.priority || data.executiveSummary?.priority,
+        confidence: undefined,
+        verdict: data.finalRecommendation?.verdict || data.executiveSummary?.verdict,
+        docxPath: docxRel,
+        jsonPath: rel,
+      });
+      known.add(id);
+      added += 1;
+    }
+    if (added > 0) {
+      await saveIndex(index);
+      appendLog("app", `Reconciled ${added} orphan report(s) from Blob`);
+    }
+  });
+}
+
 export async function getDashboardStats() {
+  await reconcileOrphanReports();
   const { reports } = await loadIndex();
   return {
     total: reports.length,
@@ -149,6 +204,7 @@ export async function getDashboardStats() {
 }
 
 export async function listReports(opts?: { q?: string; page?: number; pageSize?: number }) {
+  await reconcileOrphanReports();
   const q = (opts?.q || "").toLowerCase().trim();
   const page = Math.max(1, opts?.page || 1);
   const pageSize = Math.min(100, Math.max(1, opts?.pageSize || 20));

@@ -76,30 +76,21 @@ export async function durableWriteFile(
   return full;
 }
 
-export async function durableReadFile(rel: string): Promise<Buffer | null> {
-  const full = abs(rel);
-  if (fs.existsSync(full)) return fs.readFileSync(full);
-
-  if (!blobEnabled()) return null;
-
+async function readFromBlob(rel: string): Promise<Buffer | null> {
   const key = blobKey(rel);
   const access = blobAccess();
-  // Mutable files (index.json) must bypass CDN or the next instance sees a stale empty index → 404.
+  // Always bypass CDN for shared mutable state (index.json) and fresh DOCX.
   const getOpts = { access, useCache: false as const };
 
   try {
     const result = await get(key, getOpts);
     if (result?.statusCode === 200 && result.stream) {
-      const buf = await streamToBuffer(result.stream);
-      fs.mkdirSync(path.dirname(full), { recursive: true });
-      fs.writeFileSync(full, buf);
-      return buf;
+      return streamToBuffer(result.stream);
     }
   } catch {
-    /* fall through to list+fetch for older public URLs */
+    /* fall through */
   }
 
-  // Fallback: list then fetch (works for public stores; private needs get above)
   const { blobs } = await list({ prefix: key, limit: 20 });
   const hit = blobs.find((b) => b.pathname === key);
   if (!hit) return null;
@@ -108,10 +99,7 @@ export async function durableReadFile(rel: string): Promise<Buffer | null> {
     try {
       const result = await get(hit.url, getOpts);
       if (result?.statusCode === 200 && result.stream) {
-        const buf = await streamToBuffer(result.stream);
-        fs.mkdirSync(path.dirname(full), { recursive: true });
-        fs.writeFileSync(full, buf);
-        return buf;
+        return streamToBuffer(result.stream);
       }
     } catch {
       return null;
@@ -121,10 +109,32 @@ export async function durableReadFile(rel: string): Promise<Buffer | null> {
 
   const res = await fetch(hit.url, { cache: "no-store" });
   if (!res.ok) return null;
-  const buf = Buffer.from(await res.arrayBuffer());
+  return Buffer.from(await res.arrayBuffer());
+}
+
+function cacheLocal(rel: string, buf: Buffer) {
+  const full = abs(rel);
   fs.mkdirSync(path.dirname(full), { recursive: true });
   fs.writeFileSync(full, buf);
-  return buf;
+  return full;
+}
+
+export async function durableReadFile(rel: string): Promise<Buffer | null> {
+  const full = abs(rel);
+
+  // When Blob is enabled it is the source of truth. Preferring /tmp first caused
+  // stale per-instance index.json to overwrite Blob and drop new reports from the UI
+  // even though the .docx files were still in Blob.
+  if (blobEnabled()) {
+    const fromBlob = await readFromBlob(rel);
+    if (fromBlob) {
+      cacheLocal(rel, fromBlob);
+      return fromBlob;
+    }
+  }
+
+  if (fs.existsSync(full)) return fs.readFileSync(full);
+  return null;
 }
 
 /** On Vercel, /tmp is per-instance — Blob is required or the next request 404s. */
@@ -155,7 +165,7 @@ export async function durableWriteJson(rel: string, data: unknown): Promise<void
 export async function durableEnsureLocal(relOrAbs: string): Promise<string | null> {
   const rel = toRelPath(relOrAbs);
   const full = abs(rel);
-  if (fs.existsSync(full)) return full;
+  // Always go through durableReadFile so Blob wins over stale /tmp when enabled.
   const buf = await durableReadFile(rel);
   return buf ? full : null;
 }
@@ -179,6 +189,21 @@ export async function durableDelete(relOrAbs: string): Promise<void> {
   } catch {
     /* ignore */
   }
+}
+
+export async function durableListRelPaths(prefix: string): Promise<string[]> {
+  if (!blobEnabled()) return [];
+  const keyPrefix = blobKey(prefix);
+  const out: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const result = await list({ prefix: keyPrefix, limit: 200, cursor });
+    for (const b of result.blobs) {
+      out.push(b.pathname.replace(/^prospect-storage\//, ""));
+    }
+    cursor = result.hasMore ? result.cursor : undefined;
+  } while (cursor);
+  return out;
 }
 
 export function localAbs(rel: string) {
