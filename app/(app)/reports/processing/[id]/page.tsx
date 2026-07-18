@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Card, Progress, Button } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/status-badge";
@@ -30,8 +30,10 @@ type Batch = {
 
 export default function ProcessingPage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
   const [batch, setBatch] = useState<Batch | null>(null);
   const [reports, setReports] = useState<Report[]>([]);
+  const [removing, setRemoving] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -79,6 +81,22 @@ export default function ProcessingPage() {
     };
   }, [params.id]);
 
+  async function removeAll() {
+    if (!confirm("Remove these reports from the queue / list?")) return;
+    setRemoving(true);
+    try {
+      await Promise.all(reports.map((r) => fetch(`/api/reports/${r.id}`, { method: "DELETE" })));
+      try {
+        sessionStorage.removeItem(`prospect_batch_${params.id}`);
+      } catch {
+        /* ignore */
+      }
+      router.push("/reports");
+    } finally {
+      setRemoving(false);
+    }
+  }
+
   const overall =
     batch && batch.total
       ? Math.round(((batch.completed + batch.failed) / batch.total) * 100)
@@ -86,16 +104,34 @@ export default function ProcessingPage() {
 
   const stageLabel =
     reports.find((r) => r.status === "processing")?.message ||
-    (batch?.status === "completed" ? "Completed." : batch?.status === "queued" ? "Queued…" : "Working…");
+    (batch?.status === "completed"
+      ? "Completed."
+      : batch?.status === "queued"
+        ? "Waiting… (older jobs may be stuck — use Remove below)"
+        : "Working…");
+
+  const stuck = batch?.status === "queued" || reports.some((r) => r.status === "queued");
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Processing</h1>
-        <p className="text-sm text-muted-foreground">
-          Live progress for batch {params.id.slice(0, 8)}… · {batch?.filename || "CSV"}
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Processing</h1>
+          <p className="text-sm text-muted-foreground">
+            Batch {params.id.slice(0, 8)}… · {batch?.filename || "CSV"}
+          </p>
+        </div>
+        <Button variant="outline" disabled={removing || reports.length === 0} onClick={() => void removeAll()}>
+          {removing ? "Removing…" : "Remove from queue"}
+        </Button>
       </div>
+
+      {stuck ? (
+        <Card className="border-warning/40 bg-warning/5 p-4 text-sm text-muted-foreground">
+          This job was created under the old background-queue mode and may never start. Remove it, then generate again
+          — new runs process immediately (can take 1–2 minutes while researching the website).
+        </Card>
+      ) : null}
 
       <Card className="space-y-4 p-6">
         <div className="flex items-center justify-between gap-3">
@@ -109,14 +145,6 @@ export default function ProcessingPage() {
           <div>Failed: {batch?.failed ?? 0}</div>
           <div>Queued: {batch?.queued ?? 0}</div>
         </div>
-        <ul className="space-y-2 text-sm text-muted-foreground">
-          <li>Uploading CSV… ✓</li>
-          <li>Reading rows… ✓</li>
-          <li>Researching company…</li>
-          <li>Analyzing…</li>
-          <li>Generating DOCX…</li>
-          <li>{batch?.status === "completed" ? "Completed." : "In progress…"}</li>
-        </ul>
       </Card>
 
       <Card className="overflow-hidden">
@@ -141,6 +169,23 @@ export default function ProcessingPage() {
                     Open
                   </Link>
                 ) : null}
+                <button
+                  type="button"
+                  className="text-sm text-danger hover:underline"
+                  disabled={removing}
+                  onClick={async () => {
+                    if (!confirm(`Remove ${r.company}?`)) return;
+                    setRemoving(true);
+                    try {
+                      await fetch(`/api/reports/${r.id}`, { method: "DELETE" });
+                      setReports((prev) => prev.filter((x) => x.id !== r.id));
+                    } finally {
+                      setRemoving(false);
+                    }
+                  }}
+                >
+                  Remove
+                </button>
               </div>
             </div>
           ))}

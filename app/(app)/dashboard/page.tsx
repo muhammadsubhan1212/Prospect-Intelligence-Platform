@@ -1,21 +1,66 @@
+"use client";
+
+import { useEffect, useState, useTransition } from "react";
 import Link from "next/link";
-import { FilePlus2, CheckCircle2, Loader2, XCircle, Files } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { FilePlus2, CheckCircle2, Loader2, XCircle, Files, Trash2 } from "lucide-react";
 import { Card, Button } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/status-badge";
-import { getDashboardStats, listReports } from "@/server/services/report-service";
 import { formatDate } from "@/lib/utils";
 
-export const dynamic = "force-dynamic";
+type Report = {
+  id: string;
+  batchId?: string;
+  company: string;
+  fullName: string;
+  status: string;
+  createdAt: string;
+};
 
-export default async function DashboardPage() {
-  const stats = await getDashboardStats();
-  const { items } = await listReports({ pageSize: 8 });
+type Stats = {
+  total: number;
+  queued: number;
+  processing: number;
+  completed: number;
+  failed: number;
+};
+
+export default function DashboardPage() {
+  const router = useRouter();
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [items, setItems] = useState<Report[]>([]);
+  const [pending, startTransition] = useTransition();
+
+  async function load() {
+    const res = await fetch("/api/reports?page=1&pageSize=12");
+    const json = await res.json();
+    setStats(json.stats || null);
+    setItems(json.items || []);
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function onDelete(id: string, company: string) {
+    if (!confirm(`Remove “${company}” from reports? This deletes queued/stuck jobs too.`)) return;
+    await fetch(`/api/reports/${id}`, { method: "DELETE" });
+    startTransition(() => {
+      void load();
+      router.refresh();
+    });
+  }
 
   const cards = [
-    { label: "Total Reports", value: stats.total, icon: Files, tone: "text-foreground" },
-    { label: "Processing", value: stats.processing + stats.queued, icon: Loader2, tone: "text-warning" },
-    { label: "Completed", value: stats.completed, icon: CheckCircle2, tone: "text-success" },
-    { label: "Failed", value: stats.failed, icon: XCircle, tone: "text-danger" },
+    { label: "Total Reports", value: stats?.total ?? "—", icon: Files, tone: "text-foreground" },
+    {
+      label: "Processing",
+      value: stats ? stats.processing + stats.queued : "—",
+      icon: Loader2,
+      tone: "text-warning",
+    },
+    { label: "Completed", value: stats?.completed ?? "—", icon: CheckCircle2, tone: "text-success" },
+    { label: "Failed", value: stats?.failed ?? "—", icon: XCircle, tone: "text-danger" },
   ];
 
   return (
@@ -63,12 +108,13 @@ export default async function DashboardPage() {
                 <th className="px-5 py-3 font-medium">Name</th>
                 <th className="px-5 py-3 font-medium">Status</th>
                 <th className="px-5 py-3 font-medium">Created</th>
+                <th className="px-5 py-3 font-medium">Manage</th>
               </tr>
             </thead>
             <tbody>
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className="px-5 py-10 text-center text-muted-foreground">
+                  <td colSpan={5} className="px-5 py-10 text-center text-muted-foreground">
                     No reports yet. Upload a CSV to generate your first dossier.
                   </td>
                 </tr>
@@ -85,6 +131,35 @@ export default async function DashboardPage() {
                       <StatusBadge status={r.status} />
                     </td>
                     <td className="px-5 py-3 text-muted-foreground">{formatDate(r.createdAt)}</td>
+                    <td className="px-5 py-3">
+                      <div className="flex flex-wrap gap-2">
+                        {r.status === "completed" ? (
+                          <Link href={`/reports/${r.id}`} className="text-accent hover:underline">
+                            Open
+                          </Link>
+                        ) : r.status === "queued" || r.status === "processing" ? (
+                          <Link
+                            href={`/reports/processing/${r.batchId || r.id}`}
+                            className="text-accent hover:underline"
+                          >
+                            Progress
+                          </Link>
+                        ) : (
+                          <Link href={`/reports/${r.id}`} className="text-accent hover:underline">
+                            Details
+                          </Link>
+                        )}
+                        <button
+                          type="button"
+                          disabled={pending}
+                          className="inline-flex items-center gap-1 text-danger hover:underline disabled:opacity-50"
+                          onClick={() => void onDelete(r.id, r.company)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Remove
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))
               )}

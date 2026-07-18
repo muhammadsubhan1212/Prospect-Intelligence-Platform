@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
-import { after } from "next/server";
 import { resolveUploadCsvPath, saveUploadedCsv } from "@/server/services/csv-service";
-import { createBatchJob, runBatch, type GenerateOptions } from "@/server/services/report-service";
+import {
+  createBatchJob,
+  runBatch,
+  getBatch,
+  listReports,
+  type GenerateOptions,
+} from "@/server/services/report-service";
 import { blobEnabled } from "@/server/services/durable-store";
 
 export const runtime = "nodejs";
@@ -31,7 +36,6 @@ export async function POST(req: Request) {
       if (file && file instanceof File) {
         const saved = await saveUploadedCsv(file);
         uploadId = saved.upload.id;
-        csvPath = saved.upload.path;
         filename = saved.upload.filename;
         const resolved = await resolveUploadCsvPath(uploadId);
         csvPath = resolved.csvPath;
@@ -54,41 +58,26 @@ export async function POST(req: Request) {
       filename = resolved.upload.filename;
     }
 
-    const { batch, reports } = await createBatchJob({
+    const { batch } = await createBatchJob({
       csvUploadId: uploadId!,
       filename,
       csvPath: csvPath!,
       options,
     });
 
-    // On Vercel without Blob, /tmp is not shared — finish the batch in this same invocation
-    // so the client gets a completed result without polling another instance.
-    const runInline = process.env.VERCEL === "1" && !blobEnabled();
+    // Always process in this same request — no background queue.
+    // Vercel `after()` left jobs stuck as "queued"; users expect immediate processing.
+    await runBatch(batch.id);
 
-    if (runInline) {
-      await runBatch(batch.id);
-      const { getBatch, listReports } = await import("@/server/services/report-service");
-      const done = await getBatch(batch.id);
-      const { items } = await listReports({ pageSize: 500 });
-      const finished = items.filter((r) => r.batchId === batch.id);
-      return NextResponse.json({ batch: done, reports: finished, inline: true });
-    }
-
-    after(async () => {
-      try {
-        await runBatch(batch.id);
-      } catch (e) {
-        console.error("Batch worker failed", e);
-      }
-    });
+    const done = await getBatch(batch.id);
+    const { items } = await listReports({ pageSize: 500 });
+    const finished = items.filter((r) => r.batchId === batch.id);
 
     return NextResponse.json({
-      batch,
-      reports,
+      batch: done,
+      reports: finished,
+      inline: true,
       blobStorage: blobEnabled(),
-      warning: !blobEnabled()
-        ? "BLOB_READ_WRITE_TOKEN is not set. On Vercel, connect Blob storage so uploads/reports persist across instances."
-        : undefined,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

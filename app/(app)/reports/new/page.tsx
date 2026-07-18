@@ -352,7 +352,14 @@ function NewReportInner() {
         } catch {
           /* ignore quota */
         }
-        router.push(`/reports/processing/${json.batch.id}`);
+        const completed = (json.reports || []).filter(
+          (r: { status?: string }) => r.status === "completed"
+        );
+        if (completed.length === 1) {
+          router.push(`/reports/${completed[0].id}`);
+        } else {
+          router.push(`/reports/processing/${json.batch.id}`);
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -562,7 +569,7 @@ function NewReportInner() {
               <Input value={timeoutMs} onChange={(e) => setTimeoutMs(e.target.value)} type="number" />
             </div>
             <Button onClick={onGenerate} disabled={generating}>
-              {generating ? "Starting…" : "Generate"}
+              {generating ? "Researching & generating… (1–2 min)" : "Generate"}
             </Button>
           </Card>
 
