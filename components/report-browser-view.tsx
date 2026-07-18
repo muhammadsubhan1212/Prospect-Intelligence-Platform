@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Maximize2, Minimize2, X, Download, Printer } from "lucide-react";
 import { Button } from "@/components/ui/primitives";
-import type { ProspectData } from "@/server/services/engine";
+import type { Lead, ProspectData } from "@/server/services/engine";
 
 type Props = {
   reportId: string;
@@ -57,7 +57,7 @@ export function ReportBrowserView({ reportId, company, data }: Props) {
     return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
 
-  const lead = data.lead || {};
+  const lead: Partial<Lead> = data.lead || {};
   const exec = data.executiveSummary || {};
   const overview = (data.companyOverview || {}) as Record<string, unknown>;
   const offer = data.bestFirstOffer || {};
