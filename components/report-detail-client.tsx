@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Download, Maximize2, FileText } from "lucide-react";
+import { Check, Copy, Download, Maximize2, FileText } from "lucide-react";
 import { Card, Button } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/status-badge";
 import { formatDate } from "@/lib/utils";
@@ -22,6 +22,7 @@ export function ReportDetailClient({ id }: Props) {
   const [payload, setPayload] = useState<CachedReportPayload | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -65,6 +66,24 @@ export function ReportDetailClient({ id }: Props) {
     };
   }, [id]);
 
+  async function copyJson() {
+    const data = payload?.data;
+    if (!data) return;
+    const text = JSON.stringify(data, null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  }
+
   if (loading) {
     return <div className="text-sm text-muted-foreground">Loading report…</div>;
   }
@@ -102,6 +121,12 @@ export function ReportDetailClient({ id }: Props) {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          {data ? (
+            <Button variant="outline" onClick={() => void copyJson()}>
+              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              {copied ? "Copied!" : "Copy JSON"}
+            </Button>
+          ) : null}
           {report.status === "completed" && data ? (
             <Link href={`/reports/${report.id}/view`}>
               <Button variant="outline">
@@ -221,7 +246,20 @@ export function ReportDetailClient({ id }: Props) {
       </Card>
 
       <Card className="p-5">
-        <h2 className="mb-3 font-medium">Research JSON</h2>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="font-medium">Research JSON</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Copy and paste into your own AI for sales verification or deeper analysis.
+            </p>
+          </div>
+          {data ? (
+            <Button size="sm" variant="outline" onClick={() => void copyJson()}>
+              {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+              {copied ? "Copied!" : "Copy JSON"}
+            </Button>
+          ) : null}
+        </div>
         {data ? (
           <pre className="max-h-[480px] overflow-auto rounded-lg bg-muted p-4 text-xs leading-relaxed">
             {JSON.stringify(data, null, 2)}
