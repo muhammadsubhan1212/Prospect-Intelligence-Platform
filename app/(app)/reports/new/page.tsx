@@ -23,6 +23,7 @@ import {
   paginateClient,
   saveCsvText,
 } from "@/lib/csv-workspace";
+import { cacheReportsFromGenerate } from "@/lib/report-cache";
 
 type UploadMeta = {
   id: string;
@@ -352,6 +353,7 @@ function NewReportInner() {
         } catch {
           /* ignore quota */
         }
+        cacheReportsFromGenerate(json);
         const completed = (json.reports || []).filter(
           (r: { status?: string }) => r.status === "completed"
         );

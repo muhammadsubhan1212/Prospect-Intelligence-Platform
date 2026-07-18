@@ -84,9 +84,11 @@ export async function durableReadFile(rel: string): Promise<Buffer | null> {
 
   const key = blobKey(rel);
   const access = blobAccess();
+  // Mutable files (index.json) must bypass CDN or the next instance sees a stale empty index → 404.
+  const getOpts = { access, useCache: false as const };
 
   try {
-    const result = await get(key, { access });
+    const result = await get(key, getOpts);
     if (result?.statusCode === 200 && result.stream) {
       const buf = await streamToBuffer(result.stream);
       fs.mkdirSync(path.dirname(full), { recursive: true });
@@ -104,7 +106,7 @@ export async function durableReadFile(rel: string): Promise<Buffer | null> {
 
   if (access === "private") {
     try {
-      const result = await get(hit.url, { access: "private" });
+      const result = await get(hit.url, getOpts);
       if (result?.statusCode === 200 && result.stream) {
         const buf = await streamToBuffer(result.stream);
         fs.mkdirSync(path.dirname(full), { recursive: true });
@@ -117,12 +119,23 @@ export async function durableReadFile(rel: string): Promise<Buffer | null> {
     return null;
   }
 
-  const res = await fetch(hit.url);
+  const res = await fetch(hit.url, { cache: "no-store" });
   if (!res.ok) return null;
   const buf = Buffer.from(await res.arrayBuffer());
   fs.mkdirSync(path.dirname(full), { recursive: true });
   fs.writeFileSync(full, buf);
   return buf;
+}
+
+/** On Vercel, /tmp is per-instance — Blob is required or the next request 404s. */
+export function assertBlobOnVercel(action = "this operation") {
+  const onVercel = process.env.VERCEL === "1" || !!process.env.VERCEL_ENV;
+  if (onVercel && !blobEnabled()) {
+    throw new Error(
+      `Vercel Blob is not connected — ${action} cannot persist across serverless instances. ` +
+        `In Vercel: Storage → Blob → Create → Connect to this project (sets BLOB_READ_WRITE_TOKEN), then redeploy.`
+    );
+  }
 }
 
 export async function durableReadJson<T>(rel: string, fallback: T): Promise<T> {

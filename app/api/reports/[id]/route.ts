@@ -10,7 +10,10 @@ export async function GET(_req: Request, ctx: Ctx) {
   const report = await getReport(id);
   if (!report) return NextResponse.json({ error: "Not found" }, { status: 404 });
   const data = await getReportJson(id);
-  return NextResponse.json({ report, data });
+  return NextResponse.json(
+    { report, data },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 export async function DELETE(_req: Request, ctx: Ctx) {

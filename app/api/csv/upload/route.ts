@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { saveUploadedCsv, LARGE_CSV_ROW_THRESHOLD } from "@/server/services/csv-service";
+import { assertBlobOnVercel } from "@/server/services/durable-store";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -8,6 +9,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   try {
+    assertBlobOnVercel("CSV upload");
     const contentLength = Number(req.headers.get("content-length") || 0);
     // Soft guidance — actual limit is next.config experimental body size (100mb)
     if (contentLength > 95 * 1024 * 1024) {

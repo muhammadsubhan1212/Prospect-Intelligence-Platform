@@ -5,15 +5,17 @@ import {
   runBatch,
   getBatch,
   listReports,
+  getReportJson,
   type GenerateOptions,
 } from "@/server/services/report-service";
-import { blobEnabled } from "@/server/services/durable-store";
+import { assertBlobOnVercel, blobEnabled } from "@/server/services/durable-store";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
 export async function POST(req: Request) {
   try {
+    assertBlobOnVercel("report generation");
     const contentType = req.headers.get("content-type") || "";
     let uploadId: string | undefined;
     let options: GenerateOptions = { saveJson: true, timeout: 12000 };
@@ -72,10 +74,18 @@ export async function POST(req: Request) {
     const done = await getBatch(batch.id);
     const { items } = await listReports({ pageSize: 500 });
     const finished = items.filter((r) => r.batchId === batch.id);
+    // Include research JSON so the browser can open the report even if the next
+    // serverless instance briefly can't see Blob index.json.
+    const reports = await Promise.all(
+      finished.map(async (r) => ({
+        ...r,
+        data: r.status === "completed" ? await getReportJson(r.id) : null,
+      }))
+    );
 
     return NextResponse.json({
       batch: done,
-      reports: finished,
+      reports,
       inline: true,
       blobStorage: blobEnabled(),
     });

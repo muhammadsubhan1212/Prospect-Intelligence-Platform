@@ -34,7 +34,7 @@ npm run engine -- --csv "..\google_contacts_prep\output_test\whatsapp_present_fu
 ## Deploy to Vercel
 
 1. Push this repo (or the `prospect-platform` folder as the project root).
-2. **Create a Blob store** in the Vercel project (Storage → Blob → Connect). This injects `BLOB_READ_WRITE_TOKEN` so CSV uploads and reports survive across serverless instances. Without it, `/tmp` is empty on the next request and you get “Upload not found”.
+2. **Create a Blob store** in the Vercel project (Storage → Blob → Create → Connect). This injects `BLOB_READ_WRITE_TOKEN` so CSV uploads and reports survive across serverless instances. **Required** — without it, Generate succeeds then the report page 404s because the next request hits a different machine with an empty `/tmp`.
 3. No auth env vars required.
 4. Deploy. Hobby plans have shorter function timeouts — Pro recommended for multi-row batches.
 
