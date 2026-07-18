@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Maximize2, Minimize2, X, Download, Printer } from "lucide-react";
+import { Maximize2, Minimize2, X, Download, Printer, Copy, Check } from "lucide-react";
 import { Button } from "@/components/ui/primitives";
 import type { Lead, ProspectData } from "@/server/services/engine";
 
@@ -33,6 +33,7 @@ function Kv({ label, value }: { label: string; value?: React.ReactNode }) {
 export function ReportBrowserView({ reportId, company, data }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const toggleFullscreen = useCallback(async () => {
     const el = rootRef.current;
@@ -50,6 +51,22 @@ export function ReportBrowserView({ reportId, company, data }: Props) {
       setFullscreen((v) => !v);
     }
   }, []);
+
+  const copyJson = useCallback(async () => {
+    const text = JSON.stringify(data, null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  }, [data]);
 
   useEffect(() => {
     const onChange = () => setFullscreen(Boolean(document.fullscreenElement));
@@ -95,6 +112,10 @@ export function ReportBrowserView({ reportId, company, data }: Props) {
           <div className="font-semibold">{company}</div>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" onClick={() => void copyJson()}>
+            {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            {copied ? "Copied!" : "Copy JSON"}
+          </Button>
           <a href={`/api/reports/${reportId}/download`}>
             <Button size="sm" variant="outline">
               <Download className="h-3.5 w-3.5" />
