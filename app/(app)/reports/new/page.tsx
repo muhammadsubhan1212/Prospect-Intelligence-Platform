@@ -8,10 +8,13 @@ import { formatBytes } from "@/lib/utils";
 import {
   LARGE_CSV_ROW_THRESHOLD,
   LARGE_CSV_SIZE_BYTES,
+  VERCEL_SAFE_UPLOAD_BYTES,
   clearNewReportSession,
   estimateCsvRows,
   loadNewReportSession,
+  readUploadError,
   saveNewReportSession,
+  truncateCsvFile,
   type NewReportSession,
 } from "@/lib/new-report-session";
 
@@ -182,12 +185,21 @@ function NewReportInner() {
       setUploading(true);
       setLargePrompt(null);
       try {
+        let toSend = file;
+        if (maxRows != null) {
+          toSend = await truncateCsvFile(file, maxRows);
+        } else if (file.size > VERCEL_SAFE_UPLOAD_BYTES) {
+          throw new Error(
+            `Full CSV is ${formatBytes(file.size)} — Vercel only accepts ~4.5MB per upload. Use “Load first ${LARGE_CSV_ROW_THRESHOLD.toLocaleString()} rows” instead.`
+          );
+        }
+
         const form = new FormData();
-        form.append("file", file);
+        form.append("file", toSend);
         if (maxRows != null) form.append("maxRows", String(maxRows));
         const res = await fetch("/api/csv/upload", { method: "POST", body: form });
+        if (!res.ok) throw new Error(await readUploadError(res));
         const json = await res.json();
-        if (!res.ok) throw new Error(json.error || "Upload failed");
         applyUploadMeta(json.upload);
         setRow("1");
         setRowFrom("1");
@@ -318,8 +330,9 @@ function NewReportInner() {
               <p className="mt-1 text-sm text-muted-foreground">
                 <span className="font-medium text-foreground">{largePrompt.file.name}</span> — about{" "}
                 <span className="font-medium text-foreground">{largePrompt.estimatedRows.toLocaleString()}</span>{" "}
-                rows ({formatBytes(largePrompt.file.size)}). Load the first {LARGE_CSV_ROW_THRESHOLD.toLocaleString()}{" "}
-                rows (faster), or wait and upload the full file.
+                rows ({formatBytes(largePrompt.file.size)}). On Vercel, only ~4.5MB can be uploaded at once — choose
+                the first {LARGE_CSV_ROW_THRESHOLD.toLocaleString()} rows (trimmed in your browser), or upload the full
+                file only if it is under that limit.
               </p>
             </div>
             <button type="button" className="rounded-md p-1 text-muted-foreground hover:bg-muted" onClick={() => setLargePrompt(null)}>
@@ -330,7 +343,16 @@ function NewReportInner() {
             <Button disabled={uploading} onClick={() => void uploadFile(largePrompt.file, LARGE_CSV_ROW_THRESHOLD)}>
               {uploading ? "Loading…" : `Load first ${LARGE_CSV_ROW_THRESHOLD.toLocaleString()} rows`}
             </Button>
-            <Button variant="outline" disabled={uploading} onClick={() => void uploadFile(largePrompt.file)}>
+            <Button
+              variant="outline"
+              disabled={uploading || largePrompt.file.size > VERCEL_SAFE_UPLOAD_BYTES}
+              onClick={() => void uploadFile(largePrompt.file)}
+              title={
+                largePrompt.file.size > VERCEL_SAFE_UPLOAD_BYTES
+                  ? "File exceeds Vercel’s ~4.5MB upload limit"
+                  : undefined
+              }
+            >
               {uploading ? "Uploading…" : "Upload full CSV"}
             </Button>
             <Button variant="ghost" disabled={uploading} onClick={() => setLargePrompt(null)}>
