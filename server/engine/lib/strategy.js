@@ -912,7 +912,7 @@ function buildProspectData(lead, research, analysis, strat, messages) {
     const vp = strat.copy.valueProps || [];
     const valuePropCombined = vp.length ? vp.map((v, i) => `${i + 1}) ${v}`).join("   ") : nf;
 
-    return {
+    const data = {
         meta: {
             reportTitle: "Prospect Intelligence Report",
             generatedDate: new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" }),
@@ -1129,6 +1129,144 @@ function buildProspectData(lead, research, analysis, strat, messages) {
         priorityV2: strat.priorityV2,
         auditLog: strat.ruleLog || [],
     };
+
+    // =====================================================================
+    // RECONCILIATION PATCHES (targeted bug fixes on top of the already-built
+    // report above — no existing field is renamed/removed/reshaped here).
+    // Deliberately the LAST thing that runs before the report object is
+    // handed back for serialization, per FIX 1's "very last step" rule.
+    // =====================================================================
+    return reconcileReportForDisplay(data);
+}
+
+/**
+ * FIX 1 — cap displayed confidence when confidenceDecay.thin is true.
+ * FIX 2 — surface (not hide) verdict/priority conflicts between the initial
+ *         scan, priorityModel.priorityTier, and priorityV2.
+ * FIX 6 — explain empty Phase-5 fields caused by thin crawl data.
+ * FIX 7 — single top-level dataQualityWarning banner flag.
+ * Runs once, at the very end of buildProspectData(), after everything else.
+ * Never throws; on any internal failure it returns `data` unmodified.
+ */
+function reconcileReportForDisplay(data) {
+    try {
+        const decay = data.confidenceDecay;
+        const thin = !!(decay && decay.thin);
+        const ceiling = thin && Number.isFinite(decay.ceiling) ? decay.ceiling : null;
+
+        // FIX 1 — the actual cap. Applied after all other confidence math
+        // (base score, Apollo boosts, urgency boosts, decomposed model) has
+        // already run, so nothing downstream can silently push it back up.
+        if (thin && ceiling !== null) {
+            try {
+                if (data.executiveSummary && Array.isArray(data.executiveSummary.keyFacts)) {
+                    data.executiveSummary.keyFacts = data.executiveSummary.keyFacts.map(([k, v]) => {
+                        if (k !== "Confidence" || typeof v !== "string") return [k, v];
+                        const m = v.match(/(\d+)/);
+                        if (!m) return [k, v];
+                        return [k, `${Math.min(parseInt(m[1], 10), ceiling)}%`];
+                    });
+                }
+                if (data.finalRecommendation && typeof data.finalRecommendation.confidence === "number") {
+                    const capped = Math.min(data.finalRecommendation.confidence, ceiling);
+                    if (capped !== data.finalRecommendation.confidence && typeof data.finalRecommendation.reasoning === "string") {
+                        data.finalRecommendation.reasoning = data.finalRecommendation.reasoning.replace(/Confidence \d+%/, `Confidence ${capped}%`);
+                    }
+                    data.finalRecommendation.confidence = capped;
+                }
+                if (data.confidenceModel && typeof data.confidenceModel.confidenceV2 === "number") {
+                    data.confidenceModel.confidenceV2 = Math.min(data.confidenceModel.confidenceV2, ceiling);
+                }
+            } catch {
+                /* never block report serialization on a display-cap issue */
+            }
+        }
+
+        // FIX 2 — reconcile, don't hide, priority disagreements between the
+        // initial scan, the pain×intent priorityModel, and priorityV2.
+        let verdictConflict = false;
+        try {
+            const rank = { High: 3, Medium: 2, Low: 1 };
+            const initialPriority = data.executiveSummary && data.executiveSummary.priority;
+            const tierPriority = data.priorityModel && data.priorityModel.priorityTier;
+            const v2Priority = data.priorityV2;
+            const seen = [initialPriority, tierPriority, v2Priority].filter((p) => rank[p]);
+            if (new Set(seen).size > 1) {
+                verdictConflict = true;
+                const reasonBits = [];
+                if (tierPriority && rank[tierPriority] < rank[initialPriority]) {
+                    reasonBits.push(`pain×intent model scores this ${tierPriority} (priority score ${data.priorityModel.priorityScore ?? "n/a"})`);
+                }
+                if (data.disqualification && data.disqualification.disqualified) reasonBits.push("disqualification signals present");
+                if (data.nurture) reasonBits.push("NURTURE (high ICP-fit, low intent) gate fired");
+                const reasonText = reasonBits.length ? reasonBits.join("; ") : "downstream signal models disagree with the initial scan";
+                const initialLabel = initialPriority ? `${initialPriority} priority` : "an unclear priority";
+                const note = `Signal conflict: initial scan suggests ${initialLabel}, but ${reasonText}. Recommend manual review before treating as ${initialPriority === "High" ? "high priority" : initialLabel.toLowerCase()}.`;
+                data.priorityReconciliation = {
+                    conflict: true,
+                    initialPriority: initialPriority || null,
+                    priorityModelTier: tierPriority || null,
+                    priorityV2: v2Priority || null,
+                    note,
+                };
+                if (data.executiveSummary && Array.isArray(data.executiveSummary.keyFacts)) {
+                    data.executiveSummary.keyFacts = data.executiveSummary.keyFacts.concat([["Signal conflict", note]]);
+                }
+            }
+        } catch {
+            verdictConflict = false;
+        }
+        if (!data.priorityReconciliation) {
+            data.priorityReconciliation = {
+                conflict: false,
+                initialPriority: (data.executiveSummary && data.executiveSummary.priority) || null,
+                priorityModelTier: (data.priorityModel && data.priorityModel.priorityTier) || null,
+                priorityV2: data.priorityV2 || null,
+                note: null,
+            };
+        }
+        data.verdictConflict = verdictConflict;
+
+        // FIX 6 — distinguish "checked, found nothing" from "couldn't check
+        // because the crawl was too thin" for the Phase-5 intelligence
+        // fields, WITHOUT changing any of those fields' existing shape
+        // (they stay plain arrays/null exactly as before) — this is purely
+        // an additive sibling map naming which ones are unreliable and why.
+        const emptyFieldReasons = {};
+        try {
+            if (thin) {
+                const thinReason = "Insufficient page content crawled — retry after headless render succeeds or with a longer timeout.";
+                if (Array.isArray(data.techGapInsights) && data.techGapInsights.length === 0) emptyFieldReasons.techGapInsights = thinReason;
+                if (Array.isArray(data.competitors) && data.competitors.length === 0) emptyFieldReasons.competitors = thinReason;
+                if (Array.isArray(data.possibleContacts) && data.possibleContacts.length === 0) emptyFieldReasons.possibleContacts = thinReason;
+                if (!data.pricingIntelligence) emptyFieldReasons.pricingIntelligence = thinReason;
+                if (!data.socialProofInsights) emptyFieldReasons.socialProofInsights = thinReason;
+                if (!data.extendedBusinessModel) emptyFieldReasons.extendedBusinessModel = thinReason;
+            }
+        } catch {
+            /* partial emptyFieldReasons is fine — never block on this */
+        }
+        data.emptyFieldReasons = emptyFieldReasons;
+
+        // FIX 7 — one glance-able top-level flag summarizing Fixes 1-6, so a
+        // rep doesn't have to read every sub-field to know something needs
+        // manual review before this report is used for outreach.
+        try {
+            const locationConflict = !!(data.trustGeoSignals && data.trustGeoSignals.locationConflict);
+            const renderGapUnresolved = !!(data.spaShellDetected && !data.headlessRenderUsed);
+            data.dataQualityWarning = !!(thin || verdictConflict || locationConflict || renderGapUnresolved);
+            data.dataQualityBanner = data.dataQualityWarning
+                ? "\u26A0 Data quality warning — see notes before using this report for outreach."
+                : null;
+        } catch {
+            data.dataQualityWarning = false;
+            data.dataQualityBanner = null;
+        }
+
+        return data;
+    } catch {
+        return data;
+    }
 }
 
 module.exports = { analyzeWebsite, decideStrategy, generateMessages, buildProspectData, classifyBusiness };

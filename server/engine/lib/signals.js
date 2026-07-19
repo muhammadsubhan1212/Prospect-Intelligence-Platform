@@ -9,7 +9,7 @@
  * neutral, empty result rather than throwing (STRICT RULE #2).
  */
 
-const { safeTest, safeMatch, clamp, isWithinMonths, guessTimezone } = require("./utils");
+const { safeTest, safeMatch, clamp, isWithinMonths, guessTimezone, parseCityStateFromAddress, samePlace } = require("./utils");
 
 // ---------------------------------------------------------------------------
 // 2.1 — Multi-signal buying-intent detection
@@ -300,20 +300,56 @@ function detectTrustAndGeoSignals(research, lead) {
         const painSignal = !testimonialsPresent && !clientLogosPresent;
         const rapportSignal = testimonialsPresent || clientLogosPresent;
 
-        const geoText = [L.city, L.state, L.country, R.facts && R.facts.address].filter(Boolean).join(", ");
-        const tz = guessTimezone(geoText) || guessTimezone(R.facts && R.facts.address);
+        // FIX 5 — the CSV-supplied lead.city/state (often the contact's
+        // personal location) and the city/state parsed out of the company's
+        // crawled address can legitimately disagree (e.g. remote employee,
+        // HQ vs. branch office). Don't silently trust one over the other —
+        // flag it so a rep can verify before using it in outreach.
+        const addressLoc = parseCityStateFromAddress((R.facts && R.facts.address) || "");
+        const csvCity = L.city || "";
+        const csvState = L.state || "";
+        const hasCsvLoc = !!(csvCity || csvState);
+        const hasAddressLoc = !!(addressLoc.city || addressLoc.state);
+        const cityMatches = samePlace(csvCity, addressLoc.city);
+        const stateMatches = samePlace(csvState, addressLoc.state);
+        const locationConflict = hasCsvLoc && hasAddressLoc && !cityMatches && !stateMatches;
 
-        return {
+        // If the two sources disagree, don't hand back a single
+        // "authoritative" city/region for messaging to personalize with —
+        // leave it blank until a human resolves it (per FIX 5).
+        const city = locationConflict ? "" : csvCity || addressLoc.city || "";
+        const region = locationConflict ? "" : csvState || L.country || addressLoc.state || "";
+
+        const geoText = locationConflict ? "" : [city, region, L.country, !city && !region ? R.facts && R.facts.address : ""].filter(Boolean).join(", ");
+        const tz = locationConflict ? null : guessTimezone(geoText) || guessTimezone(R.facts && R.facts.address);
+
+        const result = {
             testimonialsPresent,
             clientLogosPresent,
             painSignal,
             rapportSignal,
-            city: L.city || "",
-            region: L.state || L.country || "",
+            city,
+            region,
             timezone: tz ? tz.timezone : null,
             timezoneLabel: tz ? tz.label : "unknown",
             bestCallWindow: tz ? `${CALL_WINDOWS_LOCAL} (${tz.label})` : "Unknown — no location data to derive a timezone",
+            // FIX 5 — additive fields; existing consumers reading city/region/
+            // timezone/bestCallWindow above are unaffected.
+            locationConflict,
+            locationConflictNote: locationConflict
+                ? `Conflicting location data: CSV shows ${[csvCity, csvState].filter(Boolean).join(", ") || "unknown"}, site/address shows ${[addressLoc.city, addressLoc.state].filter(Boolean).join(", ") || "unknown"} — verify before referencing location in outreach.`
+                : null,
+            csvLocation: { city: csvCity, state: csvState },
+            addressLocation: addressLoc,
         };
+        if (locationConflict && R.notes && Array.isArray(R.notes)) {
+            try {
+                R.notes.push(result.locationConflictNote);
+            } catch {
+                /* never let a note push fail the whole detector */
+            }
+        }
+        return result;
     } catch {
         return {
             testimonialsPresent: false,
@@ -325,6 +361,10 @@ function detectTrustAndGeoSignals(research, lead) {
             timezone: null,
             timezoneLabel: "unknown",
             bestCallWindow: "Unknown — trust/geo check failed safely",
+            locationConflict: false,
+            locationConflictNote: null,
+            csvLocation: { city: "", state: "" },
+            addressLocation: { city: "", state: "" },
         };
     }
 }

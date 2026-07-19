@@ -80,8 +80,15 @@ async function headlessRenderFetch(url, opts = {}) {
         return { html: "", ok: false, engine: null, reason: "puppeteer not installed — headless render skipped (npm install puppeteer to enable)" };
     }
     let browser;
-    try {
-        browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+    const run = async () => {
+        // FIX 4 — extra flags so the launch also survives constrained/container
+        // hosts (low /dev/shm, no GPU) instead of failing to spawn at all;
+        // this is what was silently starving techGapInsights/competitors/
+        // possibleContacts/etc. of real content on JS-heavy sites.
+        browser = await puppeteer.launch({
+            headless: "new",
+            args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        });
         const page = await browser.newPage();
         await page.setUserAgent(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
@@ -89,8 +96,17 @@ async function headlessRenderFetch(url, opts = {}) {
         await page.goto(url, { waitUntil: "networkidle2", timeout });
         const html = await page.content();
         return { html: html || "", ok: !!html, engine: "puppeteer", reason: "" };
+    };
+    try {
+        // FIX 4 — the caller-supplied `timeout` bounds page.goto(), but launch()
+        // itself has no such bound; wrap the whole attempt in a hard ceiling so
+        // a stuck browser process can never hang the pipeline indefinitely.
+        return await Promise.race([
+            run(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("headless render exceeded overall time budget")), timeout + 10000)),
+        ]);
     } catch (e) {
-        return { html: "", ok: false, engine: "puppeteer", reason: `headless render failed: ${String((e && e.message) || e)}` };
+        return { html: "", ok: false, engine: "puppeteer", reason: `headless render failed or timed out: ${String((e && e.message) || e)}` };
     } finally {
         try {
             if (browser) await browser.close();

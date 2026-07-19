@@ -178,6 +178,64 @@ const REGION_TIMEZONES = [
     [/\b(johannesburg|south africa|cape town)\b/i, "Africa/Johannesburg", "South Africa Time"],
 ];
 
+/**
+ * FIX 5 (reconciliation) — lightweight, dependency-free heuristic to pull a
+ * city/state pair out of a free-text mailing address like
+ * "1029 N Peachtree Pkwy, Peachtree City, Georgia, United States, 30269".
+ * Never throws; returns { city: "", state: "" } on anything it can't parse.
+ */
+function parseCityStateFromAddress(address) {
+    try {
+        if (!address || typeof address !== "string") return { city: "", state: "" };
+        const COUNTRY_RE = /^(united states( of america)?|usa|u\.s\.a\.?|uk|united kingdom|canada|australia|ireland)$/i;
+        const ZIP_RE = /^\d{4,10}(-\d{3,4})?$/;
+        const parts = address
+            .split(",")
+            .map((p) => p.trim())
+            .filter(Boolean)
+            .filter((p) => !COUNTRY_RE.test(p) && !/^(us|u\.s\.?)$/i.test(p) && !ZIP_RE.test(p));
+        if (!parts.length) return { city: "", state: "" };
+        const state = parts.length >= 2 ? parts[parts.length - 1] : "";
+        const city = parts.length >= 2 ? parts[parts.length - 2] : parts[parts.length - 1];
+        return { city: city || "", state: state || "" };
+    } catch {
+        return { city: "", state: "" };
+    }
+}
+
+// Two-letter US state/territory abbreviation -> full name, so "GA" and
+// "Georgia" are recognised as the same place instead of a false conflict.
+const US_STATE_ABBR = {
+    al: "alabama", ak: "alaska", az: "arizona", ar: "arkansas", ca: "california", co: "colorado",
+    ct: "connecticut", de: "delaware", fl: "florida", ga: "georgia", hi: "hawaii", id: "idaho",
+    il: "illinois", in: "indiana", ia: "iowa", ks: "kansas", ky: "kentucky", la: "louisiana",
+    me: "maine", md: "maryland", ma: "massachusetts", mi: "michigan", mn: "minnesota", ms: "mississippi",
+    mo: "missouri", mt: "montana", ne: "nebraska", nv: "nevada", nh: "new hampshire", nj: "new jersey",
+    nm: "new mexico", ny: "new york", nc: "north carolina", nd: "north dakota", oh: "ohio", ok: "oklahoma",
+    or: "oregon", pa: "pennsylvania", ri: "rhode island", sc: "south carolina", sd: "south dakota",
+    tn: "tennessee", tx: "texas", ut: "utah", vt: "vermont", va: "virginia", wa: "washington",
+    wv: "west virginia", wi: "wisconsin", wy: "wyoming", dc: "district of columbia",
+};
+
+function normalizePlaceToken(value) {
+    const na = lc(value).replace(/[^a-z0-9\s]/g, "").trim();
+    return US_STATE_ABBR[na] || na;
+}
+
+/** Case/whitespace-insensitive equality used for location conflict checks. */
+function samePlace(a, b) {
+    try {
+        const na = normalizePlaceToken(a);
+        const nb = normalizePlaceToken(b);
+        if (!na || !nb) return true; // missing data on either side — not a conflict, just unknown
+        const na2 = na.replace(/\s+/g, "");
+        const nb2 = nb.replace(/\s+/g, "");
+        return na2 === nb2 || na2.includes(nb2) || nb2.includes(na2);
+    } catch {
+        return true;
+    }
+}
+
 function guessTimezone(text) {
     try {
         if (!text) return null;
@@ -234,4 +292,6 @@ module.exports = {
     guessTimezone,
     stripHtmlTags,
     htmlToText,
+    parseCityStateFromAddress,
+    samePlace,
 };

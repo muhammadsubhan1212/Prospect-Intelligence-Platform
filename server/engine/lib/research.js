@@ -418,7 +418,7 @@ function extractTeamHints(text, jsonLdEmployees) {
     return m ? m[1] : "";
 }
 
-function detectBusinessModel(text, tech, signals) {
+function detectBusinessModel(text, tech, signals, extraContext) {
     const t = text.toLowerCase();
     const scores = { ecommerce: 0, saas: 0, services: 0, local: 0, content: 0 };
 
@@ -433,13 +433,49 @@ function detectBusinessModel(text, tech, signals) {
     if (/our services|get a (free )?quote|request a quote|book (a )?(free )?(consultation|call)|case studies|our work|portfolio|clients we|we help|we work with/.test(t)) scores.services += 2;
     if (signals.caseStudies) scores.services += 1;
 
-    if (/opening hours|business hours|visit us|get directions|our (location|address|store)|book an appointment|walk-ins/.test(t)) scores.local += 2;
-    if (signals.address) scores.local += 1;
+    // FIX 3 — track the *distinct* corroborating local signals separately
+    // from the raw score, so a single weak hit (e.g. just a mailing address)
+    // can never be enough on its own to call a business "Local".
+    const localPhraseSignal = /opening hours|business hours|visit us|get directions|our (location|address|store)|book an appointment|walk-ins/.test(t);
+    const localAddressSignal = !!signals.address;
+    const localBookingSignal = !!(tech.booking && tech.booking.length) || /book (a )?(free )?(consultation|call|appointment)/.test(t);
+    if (localPhraseSignal) scores.local += 2;
+    if (localAddressSignal) scores.local += 1;
+    const localSignalCount = [localPhraseSignal, localAddressSignal, localBookingSignal].filter(Boolean).length;
 
     if (/read more articles|latest posts|subscribe to our newsletter|advertise with us/.test(t) && signals.blog) scores.content += 1;
 
-    const best = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
-    const type = best[1] > 0 ? best[0] : "business";
+    // FIX 3 — B2B/SaaS/health-tech vocabulary override. Checked against the
+    // crawled text AND any extra context passed in (CSV keywords/industry,
+    // extracted description) since a thin static crawl may miss it even
+    // though the lead record clearly signals a non-local business.
+    let b2bTechOverride = false;
+    try {
+        const kwHay = `${t} ${String(extraContext || "").toLowerCase()}`;
+        b2bTechOverride = /\bsaas\b|\bapi\b|\bplatform\b|health system|\benterprise\b|\bintegrations?\b|\balgorithms?\b|\bclinical\b|\behr\b|\bfhir\b/i.test(kwHay);
+    } catch {
+        b2bTechOverride = false;
+    }
+
+    let best = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+    let type = best[1] > 0 ? best[0] : "business";
+    let localGuardNote = null;
+
+    if (type === "local") {
+        // "Very high confidence" physical-location signal = all three local
+        // corroborators present at once (address + booking + visit-us style
+        // phrasing) — anything less can be overridden.
+        const highConfidencePhysical = localSignalCount >= 3;
+        if (b2bTechOverride && !highConfidencePhysical) {
+            const nextBest = Object.entries(scores).filter(([k]) => k !== "local").sort((a, b) => b[1] - a[1])[0];
+            type = nextBest && nextBest[1] > 0 ? nextBest[0] : "business";
+            localGuardNote = "Local classification suppressed: B2B/SaaS/health-tech vocabulary detected without a high-confidence physical-location signal (needs address + booking + \"visit us\"-style phrasing together).";
+        } else if (localSignalCount < 2) {
+            const nextBest = Object.entries(scores).filter(([k]) => k !== "local").sort((a, b) => b[1] - a[1])[0];
+            type = nextBest && nextBest[1] > 0 ? nextBest[0] : "business";
+            localGuardNote = "Local classification suppressed: only one corroborating local signal detected (a bare address alone is not sufficient — need 2+ of address/booking/physical-service language).";
+        }
+    }
 
     const MONETISATION = {
         ecommerce: "Online product sales (e-commerce checkout detected).",
@@ -449,7 +485,7 @@ function detectBusinessModel(text, tech, signals) {
         content: "Content/advertising or lead generation model (inferred).",
         business: "Not clearly determinable from the website (likely direct sales or services).",
     };
-    return { type, monetisation: MONETISATION[type], scores };
+    return { type, monetisation: MONETISATION[type], scores, localGuardNote };
 }
 
 function extractAudience(text) {
@@ -843,9 +879,19 @@ async function researchWebsite(lead, opts = {}) {
         teamMemberCount: countTeamMembers(pageByRole.team),
     };
     result.facts.teamHint = extractTeamHints(combinedText, ld.numberOfEmployees) || (s.teamMemberCount ? String(s.teamMemberCount) : "");
-    result.facts.businessModel = detectBusinessModel(combinedText, result.tech, s);
+    // FIX 3 — feed CSV keywords/industry + the extracted description in as
+    // extra context so the B2B/SaaS/health-tech override in
+    // detectBusinessModel() can see it even on a thin/pre-render crawl.
+    const businessModelContext = [
+        Array.isArray(lead.keywords) ? lead.keywords.join(" ") : lead.keywords,
+        lead.industry,
+        result.facts.description,
+    ].filter(Boolean).join(" ");
+    result.facts.businessModel = detectBusinessModel(combinedText, result.tech, s, businessModelContext);
     if (result.facts.businessModel && result.facts.businessModel.type !== "business")
         sources.businessModel = src("Inferred from on-site signals (cart / pricing / booking / quote flows)", baseUrl);
+    if (result.facts.businessModel && result.facts.businessModel.localGuardNote)
+        result.notes.push(result.facts.businessModel.localGuardNote);
     result.facts.sources = sources;
     result.signals = s;
     // Flat list of the pages actually reviewed, with their URLs, for verification.
