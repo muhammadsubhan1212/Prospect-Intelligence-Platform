@@ -4,8 +4,9 @@ import { useEffect, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FilePlus2, CheckCircle2, Loader2, XCircle, Files, Trash2 } from "lucide-react";
-import { Card, Button } from "@/components/ui/primitives";
+import { Card, Button, Checkbox } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/status-badge";
+import { BulkActionBar } from "@/components/bulk-action-bar";
 import { formatDate } from "@/lib/utils";
 
 type Report = {
@@ -30,6 +31,7 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [items, setItems] = useState<Report[]>([]);
   const [pending, startTransition] = useTransition();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   async function load() {
     const res = await fetch("/api/reports?page=1&pageSize=12");
@@ -45,9 +47,37 @@ export default function DashboardPage() {
   async function onDelete(id: string, company: string) {
     if (!confirm(`Remove “${company}” from reports? This deletes queued/stuck jobs too.`)) return;
     await fetch(`/api/reports/${id}`, { method: "DELETE" });
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
     startTransition(() => {
       void load();
       router.refresh();
+    });
+  }
+
+  function toggleSelected(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const allSelected = items.length > 0 && items.every((r) => selected.has(r.id));
+
+  function toggleSelectAll() {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allSelected) {
+        for (const r of items) next.delete(r.id);
+      } else {
+        for (const r of items) next.add(r.id);
+      }
+      return next;
     });
   }
 
@@ -93,6 +123,8 @@ export default function DashboardPage() {
         })}
       </div>
 
+      <BulkActionBar selectedIds={[...selected]} onClear={() => setSelected(new Set())} onDeleted={() => void load()} />
+
       <Card className="overflow-hidden">
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <h2 className="font-medium">Recent reports</h2>
@@ -104,6 +136,9 @@ export default function DashboardPage() {
           <table className="w-full text-sm">
             <thead className="bg-muted/60 text-left text-muted-foreground">
               <tr>
+                <th className="px-5 py-3 font-medium">
+                  {items.length > 0 ? <Checkbox checked={allSelected} onChange={toggleSelectAll} /> : null}
+                </th>
                 <th className="px-5 py-3 font-medium">Company</th>
                 <th className="px-5 py-3 font-medium">Name</th>
                 <th className="px-5 py-3 font-medium">Status</th>
@@ -114,13 +149,16 @@ export default function DashboardPage() {
             <tbody>
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="px-5 py-10 text-center text-muted-foreground">
+                  <td colSpan={6} className="px-5 py-10 text-center text-muted-foreground">
                     No reports yet. Upload a CSV to generate your first dossier.
                   </td>
                 </tr>
               ) : (
                 items.map((r) => (
-                  <tr key={r.id} className="border-t border-border hover:bg-muted/40">
+                  <tr key={r.id} className={`border-t border-border hover:bg-muted/40 ${selected.has(r.id) ? "bg-accent/5" : ""}`}>
+                    <td className="px-5 py-3">
+                      <Checkbox checked={selected.has(r.id)} onChange={() => toggleSelected(r.id)} />
+                    </td>
                     <td className="px-5 py-3">
                       <Link href={`/reports/${r.id}`} className="font-medium hover:text-accent">
                         {r.company}

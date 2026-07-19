@@ -77,6 +77,19 @@ export function Label({ className, ...props }: React.LabelHTMLAttributes<HTMLLab
   return <label className={cn("text-sm font-medium text-foreground", className)} {...props} />;
 }
 
+export function Checkbox({ className, ...props }: React.InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <input
+      type="checkbox"
+      className={cn(
+        "h-4 w-4 shrink-0 cursor-pointer rounded border border-border bg-card accent-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        className
+      )}
+      {...props}
+    />
+  );
+}
+
 export function Progress({ value }: { value: number }) {
   const v = Math.max(0, Math.min(100, value || 0));
   return (

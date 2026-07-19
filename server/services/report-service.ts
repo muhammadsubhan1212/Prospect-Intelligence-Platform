@@ -276,6 +276,63 @@ export async function deleteReport(id: string) {
   });
 }
 
+/** Bulk delete for the "select multiple reports" UI. Never throws on a bad
+ * id — collects per-id success/failure so the caller can report both. */
+export async function deleteReports(ids: string[]): Promise<{ deleted: string[]; failed: string[] }> {
+  const deleted: string[] = [];
+  const failed: string[] = [];
+  for (const id of [...new Set(ids)]) {
+    try {
+      const ok = await deleteReport(id);
+      if (ok) deleted.push(id);
+      else failed.push(id);
+    } catch {
+      failed.push(id);
+    }
+  }
+  return { deleted, failed };
+}
+
+/** Bundles the DOCX for each requested report id into a single .zip buffer
+ * for the "download selected" bulk action. Skips (and reports) any id whose
+ * DOCX isn't available instead of failing the whole download. */
+export async function getReportsDocxZip(
+  ids: string[]
+): Promise<{ buffer: Buffer; filename: string; included: string[]; missing: string[] } | null> {
+  const JSZip = (await import("jszip")).default;
+  const zip = new JSZip();
+  const included: string[] = [];
+  const missing: string[] = [];
+  const usedNames = new Set<string>();
+
+  for (const id of [...new Set(ids)]) {
+    const file = await getReportDocxBuffer(id);
+    if (!file) {
+      missing.push(id);
+      continue;
+    }
+    const report = await getReport(id);
+    const base = (report?.company || path.basename(file.filename, ".docx") || id)
+      .replace(/[\\/:*?"<>|]+/g, "_")
+      .trim()
+      .slice(0, 80) || id;
+    let name = `${base}.docx`;
+    let n = 2;
+    while (usedNames.has(name)) {
+      name = `${base} (${n}).docx`;
+      n += 1;
+    }
+    usedNames.add(name);
+    zip.file(name, file.buffer);
+    included.push(id);
+  }
+
+  if (included.length === 0) return null;
+  const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+  const filename = `prospect-reports-${new Date().toISOString().slice(0, 10)}.zip`;
+  return { buffer, filename, included, missing };
+}
+
 async function updateReport(id: string, patch: Partial<ReportRecord>) {
   await withIndexLock(async () => {
     const index = await loadIndex();
