@@ -66,6 +66,24 @@ function sameHost(a, b) {
     return hostOf(a) === hostOf(b);
 }
 
+/**
+ * Returns the "opposite" www/apex variant of a URL, e.g.
+ * https://zw-ml.com/ -> https://www.zw-ml.com/ and vice versa. Common real-
+ * world DNS misconfiguration (only one of the two has an A/CNAME record) —
+ * trying the other before declaring a site unreachable costs one extra
+ * request and fixes a meaningful slice of false "could not load" failures.
+ * Never throws; returns "" if it can't compute a variant.
+ */
+function toggleWwwVariant(url) {
+    try {
+        const u = new URL(url);
+        u.hostname = u.hostname.startsWith("www.") ? u.hostname.slice(4) : `www.${u.hostname}`;
+        return u.toString();
+    } catch {
+        return "";
+    }
+}
+
 async function fetchPage(url, timeout = 12000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -672,6 +690,9 @@ async function researchWebsite(lead, opts = {}) {
         spaShellDetected: false,
         headlessRenderUsed: false,
         confidenceDecay: { thin: true, ceiling: 35, flag: "Limited data — verify manually before outreach.", reason: "No research performed yet" },
+        // www/apex DNS-fallback bookkeeping — always present so downstream
+        // consumers (auditLog) never need to null-check it.
+        urlFallbackUsed: { attempted: false, succeeded: false, originalUrl: null, usedUrl: null },
     };
 
     const website = normalizeUrl(lead.website);
@@ -681,7 +702,33 @@ async function researchWebsite(lead, opts = {}) {
         return result;
     }
 
-    const home = await fetchPage(website, timeout);
+    let home = await fetchPage(website, timeout);
+    // www/apex DNS-fallback — a bare domain with no A/AAAA record (or a
+    // www subdomain that was never set up) looks identical to a genuinely
+    // dead site from fetchPage()'s point of view, but is trivially fixed by
+    // trying the other host. Only fires when the first attempt truly failed.
+    if (!home.ok || !home.html) {
+        const altUrl = toggleWwwVariant(website);
+        if (altUrl) {
+            result.urlFallbackUsed.attempted = true;
+            result.urlFallbackUsed.originalUrl = website;
+            result.urlFallbackUsed.usedUrl = altUrl;
+            try {
+                const altHome = await fetchPage(altUrl, timeout);
+                if (altHome.ok && altHome.html) {
+                    result.urlFallbackUsed.succeeded = true;
+                    result.notes.push(
+                        `Original URL ${website} could not be fetched (${home.error || "status " + home.status}); ` +
+                            `succeeded on the www/apex variant ${altUrl} instead — used that for analysis.`
+                    );
+                    home = altHome;
+                    result.website = altUrl;
+                }
+            } catch {
+                /* keep the original failed `home` — never let the fallback attempt throw */
+            }
+        }
+    }
     result.homepage = { url: home.finalUrl, status: home.status, ms: home.ms, bytes: home.bytes };
     if (!home.ok || !home.html) {
         result.notes.push(`Website could not be fetched (status ${home.status}${home.error ? ", " + home.error : ""}).`);

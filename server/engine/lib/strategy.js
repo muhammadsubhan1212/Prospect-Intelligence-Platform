@@ -331,6 +331,17 @@ function decideStrategy(lead, research, analysis, opts = {}) {
     // pushes an entry here so the final report stays auditable (STRICT RULE #6).
     const ruleLog = U.createRuleLog ? U.createRuleLog() : { fire() {}, all() { return []; } };
 
+    if (research && research.urlFallbackUsed && research.urlFallbackUsed.attempted) {
+        const fb = research.urlFallbackUsed;
+        ruleLog.fire(
+            "urlFallback.wwwApex",
+            fb.succeeded ? 1 : 0,
+            fb.succeeded
+                ? `${fb.originalUrl} was unreachable; used www/apex variant ${fb.usedUrl} for analysis instead`
+                : `${fb.originalUrl} unreachable and www/apex variant ${fb.usedUrl} also failed`
+        );
+    }
+
     const gaps = {
         chat: tech.chat.length === 0,
         capture: !s.hasForm && !s.newsletter,
@@ -1115,6 +1126,7 @@ function buildProspectData(lead, research, analysis, strat, messages) {
         pageSpeed: research.pageSpeed || null,
         spaShellDetected: research.spaShellDetected || false,
         headlessRenderUsed: research.headlessRenderUsed || false,
+        urlFallbackUsed: research.urlFallbackUsed || { attempted: false, succeeded: false, originalUrl: null, usedUrl: null },
         rankedOffers: messages.rankedOffers || [],
         roleFraming: { role: messages.role, framing: messages.roleFraming },
         segmentCopy: messages.segmentCopy || null,
