@@ -21,6 +21,24 @@ const UA =
 
 const MAX_PAGES = 10;
 
+// PHASE 1.1 / 1.2 — headless-render fallback + confidence-decay flag. Both
+// degrade gracefully (no-op) if unavailable; see lib/headlessRender.js and
+// lib/confidenceModel.js for details. Loaded defensively so a missing/renamed
+// module can never take down the whole research pipeline.
+let detectSpaShell = () => ({ isSpaShell: false, reason: "detector unavailable" });
+let headlessRenderFetch = async () => ({ html: "", ok: false, engine: null, reason: "renderer unavailable" });
+let computeCrawlDecay = () => ({ thin: false, ceiling: null, flag: null, reason: "" });
+try {
+    ({ detectSpaShell, headlessRenderFetch } = require("./headlessRender"));
+} catch {
+    /* keep safe defaults above */
+}
+try {
+    ({ computeCrawlDecay } = require("./confidenceModel"));
+} catch {
+    /* keep safe defaults above */
+}
+
 // ---------------------------------------------------------------------------
 // url helpers
 // ---------------------------------------------------------------------------
@@ -522,6 +540,20 @@ const TECH_SIGNATURES = [
     ["Fastly", /fastly|x-served-by/i],
     ["Bootstrap", /bootstrap(?:\.min)?\.(css|js)/i],
     ["Tailwind CSS", /tailwind|--tw-/i],
+    // PHASE 5.1 — expanded fingerprint library: CRM / marketing automation,
+    // cart-recovery, additional analytics/pixels not already covered above.
+    ["Salesforce", /force\.com|salesforce\.com\/(?!login)|sfdc/i],
+    ["Pipedrive", /pipedrive\.com/i],
+    ["Zoho CRM", /zoho\.com\/crm|zohopublic/i],
+    ["Freshsales", /freshsales\.io|freshworks\.com/i],
+    ["Monday.com", /monday\.com\/(?!blog)/i],
+    ["CartStack", /cartstack\.com/i],
+    ["Rejoiner", /rejoiner\.com/i],
+    ["Justuno", /justuno\.com/i],
+    ["OptinMonster", /optinmonster\.com/i],
+    ["Meta Ads Pixel", /connect\.facebook\.net\/.+\/fbevents/i],
+    ["TikTok Pixel", /analytics\.tiktok\.com/i],
+    ["Snapchat Pixel", /sc-static\.net\/scevent/i],
 ];
 
 const CHAT_SIGNATURES = [
@@ -599,6 +631,11 @@ async function researchWebsite(lead, opts = {}) {
         signals: {},
         homepage: null,
         notes: [],
+        // PHASE 1.1/1.2 defaults — always present, even on early return, so
+        // downstream consumers never need to null-check a missing field.
+        spaShellDetected: false,
+        headlessRenderUsed: false,
+        confidenceDecay: { thin: true, ceiling: 35, flag: "Limited data — verify manually before outreach.", reason: "No research performed yet" },
     };
 
     const website = normalizeUrl(lead.website);
@@ -612,10 +649,40 @@ async function researchWebsite(lead, opts = {}) {
     result.homepage = { url: home.finalUrl, status: home.status, ms: home.ms, bytes: home.bytes };
     if (!home.ok || !home.html) {
         result.notes.push(`Website could not be fetched (status ${home.status}${home.error ? ", " + home.error : ""}).`);
+        result.confidenceDecay = { thin: true, ceiling: 35, flag: "Limited data — verify manually before outreach.", reason: "Website unreachable — no content crawled" };
         return result;
     }
     result.reachable = true;
     const baseUrl = home.finalUrl;
+
+    // PHASE 1.1 — SPA-shell detection + headless-render fallback. If the
+    // static fetch looks like an empty client-side-only shell, try a
+    // headless render before any scoring happens. If puppeteer isn't
+    // installed or the render fails, we simply keep the static HTML — this
+    // never blocks or throws (see lib/headlessRender.js).
+    try {
+        const shellCheck = detectSpaShell(home.html);
+        result.spaShellDetected = !!shellCheck.isSpaShell;
+        if (shellCheck.isSpaShell) {
+            result.notes.push(`SPA-shell signature detected on homepage (${shellCheck.reason}); attempting headless render fallback.`);
+            const rendered = await headlessRenderFetch(baseUrl, { timeout: Math.max(timeout, 15000) });
+            if (rendered.ok && rendered.html && rendered.html.length > home.html.length) {
+                home.html = rendered.html;
+                home.bytes = rendered.html.length;
+                result.headlessRenderUsed = true;
+                result.notes.push("Headless render succeeded and replaced the thin static fetch for analysis.");
+            } else {
+                result.headlessRenderUsed = false;
+                if (rendered.reason) result.notes.push(`Headless render unavailable/failed: ${rendered.reason}`);
+            }
+        } else {
+            result.headlessRenderUsed = false;
+        }
+    } catch (e) {
+        result.spaShellDetected = false;
+        result.headlessRenderUsed = false;
+        result.notes.push(`SPA-shell/headless-render check failed safely: ${String((e && e.message) || e)}`);
+    }
 
     // Discover from nav + probe common paths
     const anchors = extractAnchors(home.html, baseUrl);
@@ -626,6 +693,8 @@ async function researchWebsite(lead, opts = {}) {
         "pricing", "plans", "contact", "contact-us",
         "team", "our-team", "case-studies", "portfolio", "work", "clients",
         "industries", "who-we-serve", "faq", "testimonials", "reviews",
+        // PHASE 2.2 — careers/jobs pages are a buying-timing signal (hiring = growth).
+        "careers", "jobs", "work-with-us", "join-us",
     ];
     const candidateMap = {};
     Object.entries(discovered).forEach(([k, v]) => (candidateMap[v.split("#")[0]] = k));
@@ -660,6 +729,7 @@ async function researchWebsite(lead, opts = {}) {
             : /team/i.test(role) ? "team"
             : /case|portfolio|work|client/i.test(role) ? "caseStudies"
             : /industr|who-we-serve/i.test(role) ? "industries"
+            : /career|jobs|join-us|work-with-us|hiring/i.test(role) ? "careers"
             : role;
         if (pageByRole[key]) return; // already have a page for this role
         pageByRole[key] = p.html;
@@ -781,8 +851,98 @@ async function researchWebsite(lead, opts = {}) {
     // Flat list of the pages actually reviewed, with their URLs, for verification.
     result.crawledPages = okPages.map((p) => [p.role, p.url]);
 
+    // PHASE 2 — signal detection layer (intent / timing / urgency / freshness
+    // / disqualification / trust+geo). All additive fields on `result`;
+    // never throws (see lib/signals.js for the null-safety contract).
+    try {
+        const sig = require("./signals");
+        result.intentSignals = sig.detectIntentSignals(lead, result, combinedText);
+        result.timingSignals = sig.detectBuyingTimingSignals(lead, result, combinedText);
+        result.urgencySignals = sig.detectUrgencySignals(combinedText, anchors);
+        result.freshness = sig.computeFreshnessScore(result, combinedText);
+        result.disqualification = sig.detectDisqualificationSignals(lead, result, combinedText, opts.icpProfile);
+        result.trustGeoSignals = sig.detectTrustAndGeoSignals(result, lead);
+    } catch (e) {
+        result.intentSignals = { signals: [], intentScore: 0 };
+        result.timingSignals = { signals: [], timingScore: 0 };
+        result.urgencySignals = [];
+        result.freshness = { freshnessScore: 50, stale: false, fresh: false, offerGate: "neutral", copyrightYear: null, reasons: [] };
+        result.disqualification = { disqualified: false, reasons: [] };
+        result.trustGeoSignals = { testimonialsPresent: false, clientLogosPresent: false, painSignal: false, rapportSignal: false, city: "", region: "", timezone: null, timezoneLabel: "unknown", bestCallWindow: "unknown" };
+        result.notes.push(`Signal detection layer failed safely: ${String((e && e.message) || e)}`);
+    }
+
+    // PHASE 5 — tech / industry / business-model intelligence. All additive
+    // fields on `result`; never throws (see lib/techIntel.js).
+    try {
+        const ti = require("./techIntel");
+        const schemaTypes = ldNodes.map((n) => n && n["@type"]).flat().filter(Boolean);
+
+        result.techGapInsights = ti.scoreTechGaps(result.tech, s);
+        result.offerSuppression = ti.suppressOffersForExistingTech(result.tech);
+
+        result.facts.pricingIntelligence = ti.extractPricingIntelligence(pageByRole.pricing);
+        if (result.facts.pricingIntelligence) sources.pricingIntelligence = src("Pricing page — extracted price points & tier names", result.pages.pricing || baseUrl);
+
+        result.facts.extendedBusinessModel = ti.detectExtendedBusinessModel(combinedText, schemaTypes, result.facts.pricingIntelligence);
+
+        const industryEvidence = ti.classifyIndustryFromEvidence(combinedText, schemaTypes);
+        result.facts.industryEvidence = industryEvidence;
+        result.facts.industryCrossValidation = ti.crossValidateIndustry(lead.industry, industryEvidence.industry);
+
+        result.facts.socialProofInsights = ti.computeSocialProofInsights(result.facts.rating);
+
+        result.facts.positioning = ti.extractPositioning(result.facts.valueProp, result.facts.description, metaDesc);
+        result.facts.competitors = ti.extractCompetitors(anchors, combinedText);
+
+        result.facts.possibleContacts = ti.extractPossibleContacts([pageByRole.about, pageByRole.team, pageByRole.contact]);
+        if (result.facts.possibleContacts.length) sources.possibleContacts = src("About/Team/Contact page — names + titles (unverified)", result.pages.team || result.pages.about || result.pages.contact || baseUrl);
+    } catch (e) {
+        result.techGapInsights = [];
+        result.offerSuppression = {};
+        result.facts.pricingIntelligence = null;
+        result.facts.extendedBusinessModel = null;
+        result.facts.industryEvidence = { industry: null, method: "unavailable" };
+        result.facts.industryCrossValidation = { mismatch: false, note: "Industry cross-validation unavailable" };
+        result.facts.socialProofInsights = null;
+        result.facts.positioning = null;
+        result.facts.competitors = [];
+        result.facts.possibleContacts = [];
+        result.notes.push(`Tech/industry intelligence layer failed safely: ${String((e && e.message) || e)}`);
+    }
+
+    // PHASE 3.2 — optional PageSpeed Insights integration (only runs with
+    // PAGESPEED_API_KEY set; otherwise degrades to { available: false }).
+    try {
+        const { fetchPageSpeed } = require("./pageSpeed");
+        result.pageSpeed = await fetchPageSpeed(baseUrl, { timeout: Math.min(timeout, 10000) });
+    } catch (e) {
+        result.pageSpeed = { available: false, reason: `PageSpeed check failed safely: ${String((e && e.message) || e)}` };
+    }
+
+    // PHASE 3.2 — evidence-taxonomy pain-point engine + industry-specific
+    // pain library. Computed here (rather than in strategy.js) because it
+    // needs the raw crawled text corpus, which stays private to this module.
+    try {
+        const { computePainSignals } = require("./scoring");
+        result.painModel = computePainSignals(lead, result, combinedText);
+    } catch (e) {
+        result.painModel = { signals: [], painScore: 0, industryKey: null };
+        result.notes.push(`Pain-point engine failed safely: ${String((e && e.message) || e)}`);
+    }
+
     if ([lead.linkedin, lead.companyLinkedin, lead.facebook, lead.instagram].some(Boolean)) {
         result.notes.push("Social profiles (LinkedIn/Facebook/Instagram) are login-gated; URLs are recorded from the lead data but content is not scraped.");
+    }
+
+    // PHASE 1.2 — confidence-decay flag for thin/blocked crawls (even after
+    // the 1.1 headless-render fallback). Purely additive field; does not
+    // change any existing field.
+    try {
+        result.confidenceDecay = computeCrawlDecay(result);
+        if (result.confidenceDecay && result.confidenceDecay.flag) result.notes.push(result.confidenceDecay.flag);
+    } catch {
+        result.confidenceDecay = { thin: false, ceiling: null, flag: null, reason: "decay check unavailable" };
     }
 
     return result;
@@ -800,6 +960,8 @@ function discoverPages(anchors, baseUrl) {
         caseStudies: /\b(case-stud|portfolio|our-work|case_stud)\b/i,
         team: /\b(team|our-team|leadership|people)\b/i,
         industries: /\b(industries|who-we-serve|sectors)\b/i,
+        // PHASE 2.2 — careers/jobs pages are a buying-timing signal (hiring = growth).
+        careers: /\b(careers?|jobs|join-us|work-with-us|we-?re-?hiring)\b/i,
     };
     for (const a of anchors) {
         if (!sameHost(a.href, baseUrl)) continue;
@@ -848,4 +1010,7 @@ module.exports = {
     TECH_SIGNATURES,
     CHAT_SIGNATURES,
     BOOKING_SIGNATURES,
+    // PHASE 1/2 additions — exported for direct/unit use; researchWebsite()
+    // already wires these into its result additively.
+    textContent,
 };

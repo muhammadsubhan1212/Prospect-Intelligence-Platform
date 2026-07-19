@@ -15,6 +15,24 @@
 
 const clamp = (n, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, Math.round(n)));
 
+// PHASE 1-6 additive layers. Every module degrades gracefully on its own; we
+// also guard the requires themselves so a missing/broken new module can
+// never take down the whole strategy engine (STRICT RULE #2).
+let U = {};
+let ScoringL = {};
+let ApolloL = {};
+let TechL = {};
+let ConfidenceL = {};
+let MessagingL = {};
+let DedupeL = {};
+try { U = require("./utils"); } catch { /* keep {} */ }
+try { ScoringL = require("./scoring"); } catch { /* keep {} */ }
+try { ApolloL = require("./apolloIntel"); } catch { /* keep {} */ }
+try { TechL = require("./techIntel"); } catch { /* keep {} */ }
+try { ConfidenceL = require("./confidenceModel"); } catch { /* keep {} */ }
+try { MessagingL = require("./messagingV2"); } catch { /* keep {} */ }
+try { DedupeL = require("./dedupe"); } catch { /* keep {} */ }
+
 function firstNameOf(lead) {
     if (lead.firstName) return lead.firstName;
     if (lead.fullName) return lead.fullName.split(/\s+/)[0];
@@ -301,13 +319,17 @@ function analyzeWebsite(research) {
 // strategy decision engine
 // ---------------------------------------------------------------------------
 
-function decideStrategy(lead, research, analysis) {
+function decideStrategy(lead, research, analysis, opts = {}) {
     const s = research.signals || {};
     const tech = research.tech || { stack: [], chat: [], booking: [] };
     const cls = classifyBusiness(lead, research);
     const team = parseTeamSize(lead.employees);
     const smallTeam = team !== null ? team <= 12 : true; // default assume lean unless stated
     const midTeam = team !== null && team > 12 && team <= 200;
+
+    // PHASE 1-6 — audit-trail logger. Every additive rule that fires below
+    // pushes an entry here so the final report stays auditable (STRICT RULE #6).
+    const ruleLog = U.createRuleLog ? U.createRuleLog() : { fire() {}, all() { return []; } };
 
     const gaps = {
         chat: tech.chat.length === 0,
@@ -385,6 +407,51 @@ function decideStrategy(lead, research, analysis) {
         cls.saas ? (gaps.booking ? 4 : 2) + (gaps.chat ? 1 : 0) : 0,
         "a SaaS with no frictionless demo-booking + qualification path"
     );
+
+    // ---------------------------------------------------------------------
+    // PHASE 4/5 — additive score boosts, applied BEFORE ranking so offer
+    // selection reflects Apollo firmographics + detected tech gaps. Every
+    // boost is logged for auditability (STRICT RULE #6) and is a pure
+    // addition on top of the base `score` computed above (STRICT RULE #3).
+    // ---------------------------------------------------------------------
+    let tier = "small";
+    let tierModifiers = {};
+    let deptBoosts = { boosts: {}, reasons: [] };
+    let apolloConfidenceBoost = { points: 0, reasons: [], fundingWindowBoost: false };
+    let techGapInsights = [];
+    let offerSuppression = {};
+    let socialProofBoost = null;
+    try {
+        tier = ApolloL.classifyTier ? ApolloL.classifyTier(lead, research) : "small";
+        tierModifiers = ApolloL.getTierModifiers ? ApolloL.getTierModifiers(tier) : {};
+        deptBoosts = ApolloL.computeDepartmentOfferBoosts ? ApolloL.computeDepartmentOfferBoosts(lead, ruleLog) : { boosts: {}, reasons: [] };
+        apolloConfidenceBoost = ApolloL.computeApolloConfidenceBoosts ? ApolloL.computeApolloConfidenceBoosts(lead, ruleLog) : { points: 0, reasons: [], fundingWindowBoost: false };
+        techGapInsights = research.techGapInsights || [];
+        offerSuppression = research.offerSuppression || {};
+        socialProofBoost = research.facts && research.facts.socialProofInsights && research.facts.socialProofInsights.boost;
+
+        for (const c of candidates) {
+            const tierDelta = tierModifiers[c.id] || 0;
+            if (tierDelta) {
+                c.score += tierDelta;
+                ruleLog.fire("tierModifier", tierDelta, `${tier} tier modifier applied to ${c.id}`);
+            }
+            const deptDelta = deptBoosts.boosts[c.id] || 0;
+            if (deptDelta) c.score += deptDelta;
+            for (const insight of techGapInsights) {
+                if (insight.boost === c.id) {
+                    c.score += insight.score;
+                    ruleLog.fire("techGapInsight", insight.score, `${insight.insight} -> ${c.id}`);
+                }
+            }
+            if (socialProofBoost && socialProofBoost.offerId === c.id) {
+                c.score += socialProofBoost.score;
+                ruleLog.fire("socialProofBoost", socialProofBoost.score, `Rating-based boost applied to ${c.id}`);
+            }
+        }
+    } catch {
+        /* boosts are best-effort; base `score` values remain valid even if this block fails */
+    }
 
     candidates.sort((a, b) => b.score - a.score);
     const best = candidates[0];
@@ -552,6 +619,75 @@ function decideStrategy(lead, research, analysis) {
         best.name.includes("Redesign") ? "site" : "lead-capture"
     } observation, then offer the ${best.name}.`;
 
+    // Apply the Apollo funding-window confidence boost (4.1) — additive, and
+    // can only ever RAISE priority to High when confidenceV2 crosses the
+    // threshold, never lower the original `confidence`/`priority` values.
+    if (apolloConfidenceBoost.fundingWindowBoost) {
+        ruleLog.fire("apollo.fundingWindowPriorityGate", 0, "Recent funding window checked against confidenceV2>=60 gate for priority upgrade");
+    }
+
+    // -----------------------------------------------------------------------
+    // PHASE 1.3 / 2 / 3 / 4 / 5 — decomposed confidence model, signal
+    // pass-through, fit/pain/priority scoring, tiering, channel re-ranking,
+    // and LinkedIn cross-validation. Everything below is a NEW field on the
+    // returned object — none of the fields above are touched.
+    // -----------------------------------------------------------------------
+    const icpProfile = opts.icpProfile;
+    let icpFit = { icpFitScore: 50, notes: [], profile: {} };
+    let painModel = research.painModel || { signals: [], painScore: 0, industryKey: null };
+    let revenueEfficiency = { revPerEmployee: null, tier: "unknown", note: "" };
+    let dealSize = { bucket: "unknown", multiplier: 1, effectiveTeam: null };
+    let priorityModel = { priorityScore: 0, priorityTier: "Low", painHigh: false, intentHigh: false };
+    let nurture = false;
+    let confidenceModel = { confidenceV2: confidence, subScores: { dataCompleteness: 0, contactability: 0, signalStrength: 0, offerStrength: 0 } };
+    let channelsV2 = { channelsV2: channels, note: "" };
+    let linkedinValidation = { status: "unknown", mismatch: false, note: "" };
+    const intentScore = (research.intentSignals && research.intentSignals.intentScore) || 0;
+    const timingScore = (research.timingSignals && research.timingSignals.timingScore) || 0;
+
+    try {
+        if (ScoringL.computeIcpFitScore) icpFit = ScoringL.computeIcpFitScore(lead, research, icpProfile);
+        if (ScoringL.computeRevenuePerEmployeeEfficiency) revenueEfficiency = ScoringL.computeRevenuePerEmployeeEfficiency(lead);
+        if (ScoringL.computeDealSizeWeight) dealSize = ScoringL.computeDealSizeWeight(lead, research);
+        if (ScoringL.computeMultiplicativePriority) priorityModel = ScoringL.computeMultiplicativePriority(painModel.painScore, intentScore, dealSize.multiplier);
+        if (ScoringL.shouldNurture) nurture = ScoringL.shouldNurture(icpFit.icpFitScore, intentScore);
+        if (ConfidenceL.calculateConfidence) confidenceModel = ConfidenceL.calculateConfidence(lead, research, analysis, best, gaps, timingScore, ruleLog);
+        if (ApolloL.computeChannelStrategy) channelsV2 = ApolloL.computeChannelStrategy(lead, channels);
+        if (ApolloL.crossValidateLinkedInHeuristic) linkedinValidation = ApolloL.crossValidateLinkedInHeuristic(lead);
+
+        // Apollo revenue/funding boost feeds into confidenceV2 too (4.1).
+        confidenceModel.confidenceV2 = clamp(confidenceModel.confidenceV2 + apolloConfidenceBoost.points, 0, 95);
+    } catch {
+        /* every sub-field above already has a safe default */
+    }
+
+    // 4.1 — funding-window boost can upgrade (never downgrade) priority.
+    let priorityV2 = priority;
+    if (apolloConfidenceBoost.fundingWindowBoost && confidenceModel.confidenceV2 >= 60) priorityV2 = "High";
+
+    // 3.5/3.6 — true priority = pain × intent, gated by NURTURE/DISQUALIFIED.
+    // verdictV2/priorityV2 are NEW fields — `verdict`/`priority` above are
+    // untouched so existing consumers see no change in shape or value.
+    if (priorityModel.priorityTier === "High") priorityV2 = priorityV2 === "Low" ? "Medium" : priorityV2;
+    if (priorityModel.priorityTier === "Low" && !priorityModel.intentHigh && !priorityModel.painHigh) priorityV2 = priority === "High" ? "Medium" : priority;
+
+    let verdictV2 = verdict;
+    const disqualification = research.disqualification || { disqualified: false, reasons: [] };
+    if (disqualification.disqualified) {
+        verdictV2 = "DISQUALIFIED";
+        priorityV2 = "Low";
+    } else if (nurture) {
+        verdictV2 = "NURTURE";
+    } else {
+        const urgencySignals = research.urgencySignals || [];
+        if (urgencySignals.some((u) => u.urgency === "very-high")) {
+            verdictV2 = "YES";
+            priorityV2 = "High";
+            confidenceModel.confidenceV2 = clamp(confidenceModel.confidenceV2 + 15, 0, 95);
+            ruleLog.fire("urgency.veryHigh", 15, "Very-high urgency signal detected — verdict forced to YES/High");
+        }
+    }
+
     return {
         cls,
         team,
@@ -570,6 +706,32 @@ function decideStrategy(lead, research, analysis) {
         verdict,
         bestChannel,
         nextStep,
+        // ---- PHASE 1-6 additive fields (new; existing fields above are unchanged) ----
+        candidates,
+        tier,
+        tierModifiers,
+        deptBoosts,
+        apolloConfidenceBoost,
+        techGapInsights,
+        offerSuppression,
+        icpFit,
+        painModel,
+        revenueEfficiency,
+        dealSize,
+        priorityModel,
+        nurture,
+        disqualification,
+        confidenceModel,
+        channelsV2,
+        linkedinValidation,
+        intentSignals: research.intentSignals || { signals: [], intentScore: 0 },
+        timingSignals: research.timingSignals || { signals: [], timingScore: 0 },
+        urgencySignals: research.urgencySignals || [],
+        freshness: research.freshness || { freshnessScore: 50, stale: false, fresh: false, offerGate: "neutral" },
+        trustGeoSignals: research.trustGeoSignals || {},
+        priorityV2,
+        verdictV2,
+        ruleLog: ruleLog.all ? ruleLog.all() : [],
     };
 }
 
@@ -639,7 +801,87 @@ function generateMessages(lead, research, analysis, strat) {
         ["Send me some info.", "Happy to — I'll send a short, specific breakdown of the one gap I found, not a generic deck. If it's useful we talk; if not, no harm done."],
     ];
 
-    return { whatsapp, coldEmail, linkedin, callOpener, icebreakers: ice.slice(0, 5), objectionHandling };
+    // -----------------------------------------------------------------------
+    // PHASE 6 — ranked multi-offer output, segment/industry copy, mandatory
+    // specificity rule, seniority-adapted tone, subject-line variants,
+    // dynamic objections, multi-touch sequencing, evidence-scaled urgency,
+    // and the executive why-now block. All ADDITIVE new fields on the
+    // returned object — whatsapp/coldEmail/linkedin/callOpener/icebreakers/
+    // objectionHandling above are entirely unchanged.
+    // -----------------------------------------------------------------------
+    let rankedOffers = [];
+    let role = { level: "individual", function: "general", key: "individual-general" };
+    let roleFraming = { focus: gapPhrase, care: "growth", cta: "worth me sending it over?" };
+    let segmentCopy = null;
+    let specificity = { specific: false };
+    let messagingConfidence = { messagingConfidence: strat.confidence, downgraded: false, note: "" };
+    let subjectLineVariants = [];
+    let objectionScriptsV2 = [];
+    let touchSequence = [];
+    let urgencyCopy = { intensity: "low", phrase: "" };
+    let executiveWhyNow = { summary: "", openingLine: "" };
+
+    try {
+        if (MessagingL.rankOffers) rankedOffers = MessagingL.rankOffers(strat.candidates || []);
+        if (MessagingL.classifyRole) role = MessagingL.classifyRole(lead.title, lead.seniority, lead.department);
+        if (MessagingL.getRoleFraming) roleFraming = MessagingL.getRoleFraming(role, gapPhrase);
+        if (MessagingL.getSegmentOfferCopy) {
+            const industryKey = (strat.painModel && strat.painModel.industryKey) || null;
+            const extendedType = research.facts && research.facts.extendedBusinessModel && research.facts.extendedBusinessModel.type;
+            segmentCopy = MessagingL.getSegmentOfferCopy(strat.best.id, industryKey, extendedType);
+        }
+        if (MessagingL.checkOpenerSpecificity) specificity = MessagingL.checkOpenerSpecificity(whatsapp);
+        if (MessagingL.gateMessagingConfidence) messagingConfidence = MessagingL.gateMessagingConfidence(whatsapp, strat.confidence);
+        if (MessagingL.generateSubjectLineVariants) {
+            const timingSignal = strat.timingSignals && strat.timingSignals.signals && strat.timingSignals.signals[0] && strat.timingSignals.signals[0].signal;
+            const techInsight = research.tech && research.tech.stack && research.tech.stack[0];
+            subjectLineVariants = MessagingL.generateSubjectLineVariants({ company, gapPhrase, timingSignal, techInsight });
+        }
+        if (MessagingL.buildObjectionScripts && MessagingL.inferCompanyProfile) {
+            const profile = MessagingL.inferCompanyProfile(lead, research);
+            objectionScriptsV2 = MessagingL.buildObjectionScripts(profile, offer, role);
+        }
+        if (MessagingL.buildTouchSequence) touchSequence = MessagingL.buildTouchSequence({ company, first, whatsapp, coldEmail, linkedin, callOpener });
+        if (MessagingL.scaleUrgencyCopy) {
+            const evidenceStrength = (strat.priorityModel && strat.priorityModel.priorityScore) || 0;
+            urgencyCopy = MessagingL.scaleUrgencyCopy(evidenceStrength);
+        }
+        if (MessagingL.buildExecutiveWhyNow) {
+            const topPainSignal = strat.painModel && strat.painModel.signals && strat.painModel.signals[0];
+            executiveWhyNow = MessagingL.buildExecutiveWhyNow({
+                company,
+                icpFitScore: (strat.icpFit && strat.icpFit.icpFitScore) || 50,
+                intentScore: (strat.intentSignals && strat.intentSignals.intentScore) || 0,
+                timingScore: (strat.timingSignals && strat.timingSignals.timingScore) || 0,
+                topPain: topPainSignal ? topPainSignal.label : gapPhrase,
+                offerName: offer,
+                openingLine: whatsapp,
+            });
+        }
+    } catch {
+        /* every field above already has a safe default */
+    }
+
+    return {
+        whatsapp,
+        coldEmail,
+        linkedin,
+        callOpener,
+        icebreakers: ice.slice(0, 5),
+        objectionHandling,
+        // ---- PHASE 6 additive fields (new; fields above are unchanged) ----
+        rankedOffers,
+        role,
+        roleFraming,
+        segmentCopy,
+        specificity,
+        messagingConfidence,
+        subjectLineVariants,
+        objectionScriptsV2,
+        touchSequence,
+        urgencyCopy,
+        executiveWhyNow,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -709,6 +951,11 @@ function buildProspectData(lead, research, analysis, strat, messages) {
             latestFunding: lead.latestFunding || "",
             latestFundingAmount: formatMoney(lead.latestFundingAmount) || "",
             lastRaisedAt: formatDate(lead.lastRaisedAt) || nf,
+            // PHASE 3.7 — additive: surfaces the shared-domain grouping computed by
+            // dedupe.annotateCompanyGroups() (if it was run upstream), so downstream
+            // consumers of this single JSON file can see which other contacts, if
+            // any, belong to the same company without needing the batch-level list.
+            companyGroup: lead._companyGroup || null,
         },
         executiveSummary: {
             verdict: strat.verdict,
@@ -834,6 +1081,53 @@ function buildProspectData(lead, research, analysis, strat, messages) {
             nextStep: strat.nextStep,
             reasoning: `${strat.verdict === "YES" ? "Worth contacting." : "Contact with lighter effort."} Confidence ${strat.confidence}% based on ${research.reachable ? "a reachable site" : "limited web data"} and available contact channels. The clearest lever is ${strat.best.name.toLowerCase()} (${strat.best.evidence}). Best reached via ${strat.bestChannel}.`,
         },
+        // =====================================================================
+        // PHASE 1-6 additive report block. Every field below is NEW — nothing
+        // above this point was renamed, removed, or restructured (STRICT RULE #1).
+        // =====================================================================
+        pipelineBucket: strat.verdictV2 === "DISQUALIFIED" ? "DISQUALIFIED" : strat.verdictV2 === "NURTURE" ? "NURTURE" : "STANDARD",
+        confidenceModel: strat.confidenceModel,
+        confidenceDecay: research.confidenceDecay || null,
+        icpFit: strat.icpFit,
+        painModel: strat.painModel,
+        revenueEfficiency: strat.revenueEfficiency,
+        dealSize: strat.dealSize,
+        priorityModel: strat.priorityModel,
+        tier: strat.tier,
+        techGapInsights: strat.techGapInsights,
+        offerSuppression: strat.offerSuppression,
+        intentSignals: strat.intentSignals,
+        timingSignals: strat.timingSignals,
+        urgencySignals: strat.urgencySignals,
+        freshness: strat.freshness,
+        trustGeoSignals: strat.trustGeoSignals,
+        disqualification: strat.disqualification,
+        nurture: strat.nurture,
+        channelsV2: strat.channelsV2,
+        linkedinValidation: strat.linkedinValidation,
+        industryValidation: research.facts.industryCrossValidation || null,
+        extendedBusinessModel: research.facts.extendedBusinessModel || null,
+        pricingIntelligence: research.facts.pricingIntelligence || null,
+        socialProofInsights: research.facts.socialProofInsights || null,
+        positioning: research.facts.positioning || null,
+        competitors: research.facts.competitors || [],
+        possibleContacts: research.facts.possibleContacts || [],
+        pageSpeed: research.pageSpeed || null,
+        spaShellDetected: research.spaShellDetected || false,
+        headlessRenderUsed: research.headlessRenderUsed || false,
+        rankedOffers: messages.rankedOffers || [],
+        roleFraming: { role: messages.role, framing: messages.roleFraming },
+        segmentCopy: messages.segmentCopy || null,
+        messagingSpecificity: messages.specificity || null,
+        messagingConfidence: messages.messagingConfidence || null,
+        subjectLineVariants: messages.subjectLineVariants || [],
+        objectionScriptsV2: messages.objectionScriptsV2 || [],
+        touchSequence: messages.touchSequence || [],
+        urgencyCopy: messages.urgencyCopy || null,
+        executiveWhyNow: messages.executiveWhyNow || null,
+        verdictV2: strat.verdictV2,
+        priorityV2: strat.priorityV2,
+        auditLog: strat.ruleLog || [],
     };
 }
 

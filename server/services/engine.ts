@@ -60,6 +60,10 @@ export type ProspectData = {
     reasoning?: string;
   };
   painPoints?: { pain: string; evidence: string; impact: string }[];
+  // PHASE 1-6 additive fields — optional so existing consumers are unaffected.
+  pipelineBucket?: "STANDARD" | "NURTURE" | "DISQUALIFIED";
+  verdictV2?: string;
+  priorityV2?: string;
   [key: string]: unknown;
 };
 
@@ -80,6 +84,7 @@ const bridge = require("./engine-bridge.cjs") as {
       outDir?: string;
       jsonDir?: string;
       saveJson?: boolean;
+      icpProfile?: Record<string, unknown>;
       onProgress?: (stage: string, message: string, extra?: Record<string, unknown>) => void;
     }
   ) => Promise<{
@@ -89,6 +94,15 @@ const bridge = require("./engine-bridge.cjs") as {
     strat: { best: { name: string }; priority: string; confidence: number };
     research: unknown;
   }>;
+  // PHASE 3.7 — lead-to-lead deduplication (additive, optional to callers).
+  annotateCompanyGroups: (leads: Lead[]) => Lead[];
+  reconcileCompanyVerdict: (dataList: ProspectData[]) => {
+    contactCount: number;
+    consensusVerdict: string;
+    consensusPriority: string;
+    consensusOffer: string | null;
+    perContactNotes: { fullName: string; title: string; offer: string | null; priority: string | null }[];
+  } | null;
 };
 
 export const engine = {
@@ -98,4 +112,6 @@ export const engine = {
   isIndexLike: bridge.isIndexLike,
   isIgnoredHeader: bridge.isIgnoredHeader,
   processLead: bridge.processLead,
+  annotateCompanyGroups: bridge.annotateCompanyGroups,
+  reconcileCompanyVerdict: bridge.reconcileCompanyVerdict,
 };

@@ -41,6 +41,8 @@ export type ReportRecord = {
   jsonPath?: string;
   error?: string;
   stack?: string;
+  /** PHASE 2.5/3.6 — additive. Reports stay visible in the same list/count; this only labels them. */
+  bucket?: "STANDARD" | "NURTURE" | "DISQUALIFIED";
 };
 
 export type BatchRecord = {
@@ -70,6 +72,8 @@ export type GenerateOptions = {
   company?: string;
   timeout?: number;
   saveJson?: boolean;
+  /** PHASE 3.1 — optional, one-time-configurable ICP profile for this engagement. */
+  icpProfile?: Record<string, unknown>;
 };
 
 type IndexFile = {
@@ -363,6 +367,13 @@ function resolveLeads(
     leads.push(engine.mapRecordToLead(records[i], headers));
     rowIndexes.push(i + 1);
   }
+  // PHASE 3.7 — annotate contacts sharing a root domain. Purely informational:
+  // every lead still gets its own report (no merging/dropping happens here).
+  try {
+    engine.annotateCompanyGroups(leads);
+  } catch {
+    /* best-effort annotation only */
+  }
   return { leads, rowIndexes };
 }
 
@@ -505,6 +516,7 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
       outDir: PATHS.reports(),
       jsonDir: PATHS.json(),
       saveJson: batch.options.saveJson !== false,
+      icpProfile: batch.options.icpProfile,
       onProgress: () => undefined,
     });
 
@@ -537,6 +549,8 @@ export async function processNextInBatch(batchId: string): Promise<{ done: boole
       priority: result.strat.priority,
       confidence: result.strat.confidence,
       verdict: data.finalRecommendation?.verdict || data.executiveSummary?.verdict,
+      // PHASE 2.5/3.6 — visible bucket label; report stays in the same list/count.
+      bucket: data.pipelineBucket || "STANDARD",
     });
 
     appendLog("jobs", `Report ${next.id} completed → ${docxRel}`);

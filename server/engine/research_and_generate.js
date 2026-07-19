@@ -19,6 +19,15 @@ const path = require("path");
 const { readCSVObjects, mapRecordToLead, selectRecord } = require("./lib/csv");
 const { processLead } = require("./pipeline");
 const { OUTPUT_DIR } = require("./Prospect_Intelligence_Report_Generator");
+// PHASE 3.7 — lead-to-lead deduplication by root domain (additive; degrades
+// to a no-op annotation if the module is somehow unavailable).
+let annotateCompanyGroups = (leads) => leads;
+let reconcileCompanyVerdict = () => null;
+try {
+    ({ annotateCompanyGroups, reconcileCompanyVerdict } = require("./lib/dedupe"));
+} catch {
+    /* keep no-op defaults above */
+}
 
 function parseArgs(argv) {
     const args = {};
@@ -82,7 +91,13 @@ async function main() {
         process.exit(1);
     }
 
+    // PHASE 3.7 — annotate contacts that share a root domain (informational
+    // only; every lead below still gets its own report — no leads are merged
+    // away or dropped).
+    annotateCompanyGroups(leads);
+
     const outputs = [];
+    const reportsByDomain = new Map();
     for (const lead of leads) {
         try {
             console.log(`\n► Researching: ${lead.fullName || "(no name)"} @ ${lead.company || "(no company)"}`);
@@ -97,8 +112,22 @@ async function main() {
             });
             console.log(`  report: ${result.outPath}`);
             outputs.push(result.outPath);
+            if (lead._companyGroup && lead._companyGroup.domain) {
+                const domain = lead._companyGroup.domain;
+                if (!reportsByDomain.has(domain)) reportsByDomain.set(domain, []);
+                reportsByDomain.get(domain).push(result.data);
+            }
         } catch (e) {
             console.error(`  ! failed for ${lead.company || lead.fullName}: ${e.message}`);
+        }
+    }
+
+    // PHASE 3.7 — print the reconciled company-level verdict for any domain
+    // with multiple contacts (each contact's own report is untouched).
+    for (const [domain, dataList] of reportsByDomain) {
+        const consensus = reconcileCompanyVerdict(dataList);
+        if (consensus && consensus.contactCount > 1) {
+            console.log(`\n  Company consensus for ${domain}: verdict=${consensus.consensusVerdict}, priority=${consensus.consensusPriority}, offer=${consensus.consensusOffer || "n/a"} (${consensus.contactCount} contacts)`);
         }
     }
 

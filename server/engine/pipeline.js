@@ -25,6 +25,7 @@ const { renderReport, safeFileName } = require("./Prospect_Intelligence_Report_G
  * @param {string} [opts.outDir] - where to write the .docx
  * @param {string} [opts.jsonDir] - where to write prospect_data JSON (if saveJson)
  * @param {boolean} [opts.saveJson]
+ * @param {object} [opts.icpProfile] - optional Phase 3.1 ICP profile ({targetIndustries, minEmployees, maxEmployees, geographies, techMustHave, techMustNotHave})
  * @param {(stage: string, message: string, extra?: object) => void} [opts.onProgress]
  * @returns {Promise<{ outPath: string, data: object, analysis: object, strat: object, research: object }>}
  */
@@ -83,7 +84,10 @@ async function processLead(lead, opts = {}) {
 
     onProgress("analyzing", "Analyzing website and deciding strategy...");
     const analysis = analyzeWebsite(research);
-    const strat = decideStrategy(lead, research, analysis);
+    // PHASE 3.1 — optional, one-time-configurable ICP profile for this
+    // engagement (opts.icpProfile). Purely additive: decideStrategy() still
+    // works identically for every existing caller that doesn't pass it.
+    const strat = decideStrategy(lead, research, analysis, { icpProfile: opts.icpProfile });
     const messages = generateMessages(lead, research, analysis, strat);
     const data = buildProspectData(lead, research, analysis, strat, messages);
 
@@ -93,6 +97,14 @@ async function processLead(lead, opts = {}) {
         priority: strat.priority,
         confidence: strat.confidence,
     });
+
+    // PHASE 2.5/3.6 — DISQUALIFIED/NURTURE are visible, separate categories.
+    // They still get a full report (never silently dropped) — only the
+    // pipelineBucket annotation changes (STRICT RULE: report generation must
+    // never halt or error out, and buckets must not remove leads from totals).
+    if (data.pipelineBucket && data.pipelineBucket !== "STANDARD") {
+        onProgress("analyzing", `Pipeline bucket: ${data.pipelineBucket}`, { bucket: data.pipelineBucket });
+    }
 
     if (opts.saveJson !== false && jsonDir) {
         if (!fs.existsSync(jsonDir)) fs.mkdirSync(jsonDir, { recursive: true });

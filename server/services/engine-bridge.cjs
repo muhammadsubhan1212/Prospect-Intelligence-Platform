@@ -5,6 +5,13 @@
 
 const csv = require("../engine/lib/csv");
 const { processLead } = require("../engine/pipeline");
+// PHASE 3.7 — lead-to-lead deduplication (additive; safe no-op fallback).
+let dedupe = { annotateCompanyGroups: (leads) => leads, reconcileCompanyVerdict: () => null };
+try {
+  dedupe = require("../engine/lib/dedupe");
+} catch {
+  /* keep no-op defaults above */
+}
 
 module.exports = {
   readCSVObjects: csv.readCSVObjects,
@@ -15,4 +22,6 @@ module.exports = {
   parseCSV: csv.parseCSV,
   cleanPhone: csv.cleanPhone,
   processLead,
+  annotateCompanyGroups: dedupe.annotateCompanyGroups,
+  reconcileCompanyVerdict: dedupe.reconcileCompanyVerdict,
 };
