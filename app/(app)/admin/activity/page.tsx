@@ -31,7 +31,9 @@ function label(type: string) {
     email_sent: "email sent",
     email_failed: "email not sent / failed",
     lead_opened: "opened lead",
+    email_opened: "opened Gmail",
     call_clicked: "call clicked",
+    call_no_answer: "call not connected",
     called: "called",
     called_cleared: "called undone",
     replied: "replied",
@@ -86,7 +88,7 @@ export default function AdminActivityPage() {
           onChange={(e) => setType(e.target.value)}
         >
           <option value="">Any action in the thread</option>
-          {["lead_opened", "email_sent", "email_failed", "call_clicked", "called", "replied", "meeting", "skipped", "audit_created"].map((t) => (
+          {["lead_opened", "email_opened", "email_sent", "email_failed", "call_clicked", "call_no_answer", "called", "replied", "meeting", "skipped", "audit_created"].map((t) => (
             <option key={t} value={t}>
               {label(t)}
             </option>
@@ -165,7 +167,7 @@ export default function AdminActivityPage() {
                     <span className="text-xs text-muted-foreground">{new Date(e.timestamp).toLocaleString()}</span>
                   </div>
                   {e.metadata?.note ? <p className="mt-1 text-muted-foreground">{e.metadata.note}</p> : null}
-                  {e.metadata?.message?.body ? (
+                  {e.type.startsWith("email_") && e.metadata?.message?.body ? (
                     <div className="mt-2 rounded-md bg-muted/50 p-2">
                       <div className="text-xs text-muted-foreground">To {e.metadata.message.to}</div>
                       <div className="font-medium">{e.metadata.message.subject}</div>

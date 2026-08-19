@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, FilePlus2, Files, Moon, Sun, Target, Shield } from "lucide-react";
+import { LayoutDashboard, FilePlus2, Files, Moon, Sun, Target, Shield, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/primitives";
 import { useEffect, useState } from "react";
@@ -32,6 +32,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setDark(next);
     document.documentElement.classList.toggle("dark", next);
     localStorage.setItem("theme", next ? "dark" : "light");
+  }
+
+  async function signOut() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    window.location.assign("/login");
   }
 
   return (
@@ -74,6 +79,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <div className="ml-auto flex items-center gap-2">
               <Button variant="outline" size="sm" onClick={toggleTheme} aria-label="Toggle theme">
                 {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => void signOut()}>
+                <LogOut className="h-4 w-4" />
+                Sign out
               </Button>
             </div>
           </header>

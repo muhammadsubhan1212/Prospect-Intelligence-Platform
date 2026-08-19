@@ -20,16 +20,19 @@ type Dash = {
     completed: number;
     remainingCap: number;
   };
-  leads: {
-    id: string;
-    name: string;
-    company: string;
-    title?: string;
-    email?: string;
-    phone?: string;
-    status: string;
-  }[];
-  queue: { id: string; name: string; company: string; title?: string; status: string }[];
+  leads: QueueLead[];
+  queue: QueueLead[];
+};
+
+type QueueLead = {
+  id: string;
+  name: string;
+  company: string;
+  title?: string;
+  email?: string;
+  phone?: string;
+  status: string;
+  statuses?: string[];
 };
 
 export default function OperatorDeskPage() {
@@ -77,7 +80,11 @@ export default function OperatorDeskPage() {
                   {l.title ? ` · ${l.title}` : ""}
                 </div>
               </div>
-              <StatusBadge status={l.status} />
+              <div className="flex flex-wrap justify-end gap-1">
+                {(l.statuses?.length ? l.statuses : [l.status]).filter(Boolean).map((st) => (
+                  <StatusBadge key={st} status={st} />
+                ))}
+              </div>
             </Card>
           </Link>
         ))}

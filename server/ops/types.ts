@@ -20,6 +20,7 @@ export const ACTIVITY_TYPES = [
   "email_sent",
   "email_failed",
   "call_clicked",
+  "call_no_answer",
   "called",
   "called_cleared",
   "replied",
@@ -148,6 +149,25 @@ export type AuditDocument = {
   preparedFor?: string;
   date: string;
   title: string;
+  brand?: {
+    companyName: string;
+    tagline: string;
+    website: string;
+    email: string;
+    phone: string;
+    address: string;
+    preparedBy: string;
+    themeId: string;
+    colors: {
+      accent: string;
+      accentSoft: string;
+      ink: string;
+      muted: string;
+      paper: string;
+      headerBg: string;
+    };
+    logoDataUrl?: string;
+  };
   executiveSummary: string;
   hookQuestion?: string;
   visitorStory?: string;

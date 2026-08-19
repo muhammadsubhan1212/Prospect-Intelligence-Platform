@@ -2,6 +2,7 @@ import type { ProspectData } from "@/server/services/engine";
 import type { AuditDocument, MasterLead } from "./types";
 import { newAuditId } from "./ids";
 import { GTM } from "@/lib/gtm-defaults";
+import { DEFAULT_BRAND, logoBuffer, type PitchBrand } from "./brand";
 
 function text(v: unknown): string {
   return String(v || "").replace(/\s+/g, " ").trim();
@@ -43,7 +44,7 @@ function weak(s: string) {
   return /no |not |none|missing|weak|unclear|limited|fail|unreachable|broken|absent|slow/i.test(s);
 }
 
-export function buildAuditDocument(lead: MasterLead, data: ProspectData | null): AuditDocument {
+export function buildAuditDocument(lead: MasterLead, data: ProspectData | null, brand: PitchBrand = DEFAULT_BRAND): AuditDocument {
   const audit = data?.websiteAudit;
   const sections = audit?.sections;
   const summary = takeSentences(text(audit?.summary), 4);
@@ -292,6 +293,7 @@ export function buildAuditDocument(lead: MasterLead, data: ProspectData | null):
     ifNothingChanges,
     nextStep: { offer, why },
     notObserved,
+    brand,
   };
 }
 
@@ -307,6 +309,12 @@ export function renderAuditHtml(doc: AuditDocument): string {
     .join("");
   const ul = (items: string[]) =>
     items.length ? `<ul>${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : "<p>None observed in this review.</p>";
+  const brand = doc.brand || DEFAULT_BRAND;
+  const c = brand.colors;
+  const firmBits = [brand.website, brand.email, brand.phone].filter(Boolean).join("  ·  ");
+  const logo = brand.logoDataUrl
+    ? `<img class="logo" src="${esc(brand.logoDataUrl)}" alt="${esc(brand.companyName)} logo" />`
+    : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -314,37 +322,52 @@ export function renderAuditHtml(doc: AuditDocument): string {
   <meta charset="utf-8" />
   <title>${esc(doc.title)}</title>
   <style>
-    :root { --ink:#122033; --muted:#5b6b7c; --line:#d7dee8; --accent:#0e7c7b; --paper:#f7f8fa; }
+    :root { --ink:${c.ink}; --muted:${c.muted}; --accent:${c.accent}; --soft:${c.accentSoft}; --paper:${c.paper}; --head:${c.headerBg}; }
     * { box-sizing: border-box; }
     body { margin:0; font: 15px/1.55 Georgia, "Times New Roman", serif; color:var(--ink); background:var(--paper); }
-    .page { max-width: 820px; margin: 0 auto; background:#fff; padding: 48px 56px; }
-    header { border-bottom: 3px solid var(--accent); padding-bottom: 18px; margin-bottom: 28px; }
+    .page { max-width: 820px; margin: 0 auto; background:#fff; padding: 0 0 48px; }
+    .mast { background: var(--head); color:#fff; padding: 22px 56px 18px; display:flex; justify-content:space-between; align-items:center; gap: 24px; }
+    .logo { max-height: 52px; max-width: 180px; object-fit: contain; background:#fff; padding: 6px 8px; border-radius: 6px; }
+    .firm-name { font: 700 18px/1.2 ui-sans-serif, system-ui; }
+    .firm-tag { font: 12px/1.4 ui-sans-serif, system-ui; opacity: .85; margin-top: 4px; }
+    .firm-meta { font: 11px/1.4 ui-sans-serif, system-ui; opacity: .8; margin-top: 6px; text-align: right; }
+    .bar { height: 6px; background: var(--accent); }
+    .body { padding: 28px 56px 0; }
     .kicker { font: 11px/1.3 ui-sans-serif, system-ui; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); }
-    h1 { font-size: 28px; margin: 8px 0 6px; }
+    h1 { font-size: 26px; margin: 8px 0 6px; }
     .meta { color: var(--muted); font: 13px/1.4 ui-sans-serif, system-ui; }
-    h2 { font-size: 18px; margin: 28px 0 10px; color: var(--ink); }
+    h2 { font-size: 18px; margin: 28px 0 10px; color: var(--ink); border-left: 3px solid var(--accent); padding-left: 10px; }
     h3 { font-size: 15px; margin: 16px 0 6px; }
-    p, li { color: #1c2a3a; }
+    p, li { color: var(--ink); }
     table { width:100%; border-collapse: collapse; margin: 8px 0 16px; font: 13px/1.4 ui-sans-serif, system-ui; }
-    th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; }
-    th { background: #f3f6f8; }
-    footer { margin-top: 36px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font: 12px/1.45 ui-sans-serif, system-ui; }
-    .next { background: #f2faf9; border: 1px solid #cde8e6; padding: 14px 16px; }
-    .hook { font-size: 20px; line-height: 1.35; margin: 0 0 22px; color: #0b1c2c; }
+    th, td { border: 1px solid #d7dee8; padding: 8px 10px; text-align: left; }
+    th { background: var(--soft); color: var(--ink); }
+    footer.doc-foot { margin: 36px 56px 0; padding: 14px 0 8px; border-top: 2px solid var(--accent); color: var(--muted); font: 12px/1.45 ui-sans-serif, system-ui; }
+    .next { background: var(--soft); border: 1px solid var(--accent); padding: 14px 16px; }
+    .hook { font-size: 20px; line-height: 1.35; margin: 0 0 22px; color: var(--ink); }
     @media print { body { background:#fff; } .page { padding: 0; } }
   </style>
 </head>
 <body>
   <article class="page">
-    <header>
-      <div class="kicker">Confidential client review</div>
+    <div class="mast">
+      <div>${logo || `<div class="firm-name">${esc(brand.companyName)}</div>`}</div>
+      <div>
+        ${logo ? `<div class="firm-name" style="text-align:right">${esc(brand.companyName)}</div>` : ""}
+        ${brand.tagline ? `<div class="firm-tag" style="text-align:right">${esc(brand.tagline)}</div>` : ""}
+        ${firmBits ? `<div class="firm-meta">${esc(firmBits)}</div>` : ""}
+      </div>
+    </div>
+    <div class="bar"></div>
+    <div class="body">
+    <div class="kicker">Confidential client review</div>
       <h1>${esc(doc.title)}</h1>
       <div class="meta">
         Prepared for ${esc(doc.preparedFor || doc.company)}
         ${doc.website ? ` · ${esc(doc.website)}` : ""}
+        ${brand.preparedBy ? ` · Prepared by ${esc(brand.preparedBy)}` : ""}
         · ${esc(new Date(doc.date).toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" }))}
       </div>
-    </header>
     ${doc.hookQuestion ? `<p class="hook">${esc(doc.hookQuestion)}</p>` : ""}
     <h2>1. Executive summary</h2>
     <p>${esc(doc.executiveSummary)}</p>
@@ -384,8 +407,11 @@ export function renderAuditHtml(doc: AuditDocument): string {
         ? `<h2>Scope notes</h2><p class="meta">The following were not verified and are omitted rather than guessed:</p>${ul(doc.notObserved)}`
         : ""
     }
-    <footer>
-      Prepared as a complimentary review for ${esc(doc.company)}. Observations are based on publicly visible website evidence at the review date. This document is not a sales pitch and does not include internal scoring or targeting notes.
+    </div>
+    <footer class="doc-foot">
+      ${esc(brand.companyName)}${brand.address ? ` · ${esc(brand.address)}` : ""}
+      ${firmBits ? `<br/>${esc(firmBits)}` : ""}
+      <br/>Prepared as a complimentary review for ${esc(doc.company)}. Observations are based on publicly visible website evidence at the review date.
     </footer>
   </article>
 </body>
@@ -401,12 +427,32 @@ function esc(s: string) {
 }
 
 export async function buildAuditDocx(doc: AuditDocument): Promise<Buffer> {
-  const { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType } = await import("docx");
+  const {
+    Document,
+    Packer,
+    Paragraph,
+    TextRun,
+    HeadingLevel,
+    Table,
+    TableRow,
+    TableCell,
+    WidthType,
+    AlignmentType,
+    ImageRun,
+    BorderStyle,
+    ShadingType,
+    VerticalAlign,
+  } = await import("docx");
+  const brand = doc.brand || DEFAULT_BRAND;
+  const accent = brand.colors.accent.replace("#", "");
+  const head = brand.colors.headerBg.replace("#", "");
+  const soft = brand.colors.accentSoft.replace("#", "");
+  const logo = logoBuffer(brand as PitchBrand);
   const p = (t: string, heading?: (typeof HeadingLevel)[keyof typeof HeadingLevel]) =>
     new Paragraph({
       heading,
       spacing: { after: 160 },
-      children: [new TextRun({ text: t, font: "Calibri" })],
+      children: [new TextRun({ text: t, font: "Calibri", color: brand.colors.ink.replace("#", "") })],
     });
 
   const bullets = (items: string[]) =>
@@ -419,13 +465,82 @@ export async function buildAuditDocx(doc: AuditDocument): Promise<Buffer> {
         })
     );
 
+  const noBorder = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
+  const borders = { top: noBorder, bottom: noBorder, left: noBorder, right: noBorder };
+  const firmLines = [brand.tagline, [brand.website, brand.email, brand.phone].filter(Boolean).join("  ·  "), brand.address].filter(Boolean);
+  const letterhead = new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [
+      new TableRow({
+        children: [
+          new TableCell({
+            borders,
+            width: { size: 38, type: WidthType.PERCENTAGE },
+            verticalAlign: VerticalAlign.CENTER,
+            shading: { type: ShadingType.CLEAR, fill: head },
+            children: [
+              logo
+                ? new Paragraph({
+                    children: [
+                      new ImageRun({
+                        type: logo.type,
+                        data: logo.data,
+                        transformation: { width: 140, height: 46 },
+                      }),
+                    ],
+                  })
+                : new Paragraph({
+                    children: [new TextRun({ text: brand.companyName, bold: true, color: "FFFFFF", size: 28, font: "Calibri" })],
+                  }),
+            ],
+          }),
+          new TableCell({
+            borders,
+            width: { size: 62, type: WidthType.PERCENTAGE },
+            verticalAlign: VerticalAlign.CENTER,
+            shading: { type: ShadingType.CLEAR, fill: head },
+            children: [
+              new Paragraph({
+                alignment: AlignmentType.RIGHT,
+                children: [new TextRun({ text: brand.companyName, bold: true, color: "FFFFFF", size: 22, font: "Calibri" })],
+              }),
+              ...firmLines.map(
+                (line) =>
+                  new Paragraph({
+                    alignment: AlignmentType.RIGHT,
+                    children: [new TextRun({ text: line, color: "E6EEF2", size: 16, font: "Calibri" })],
+                  })
+              ),
+            ],
+          }),
+        ],
+      }),
+    ],
+  });
+
+  const accentBar = new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [
+      new TableRow({
+        children: [
+          new TableCell({
+            borders,
+            shading: { type: ShadingType.CLEAR, fill: accent },
+            children: [new Paragraph({ children: [new TextRun({ text: " ", size: 8 })] })],
+          }),
+        ],
+      }),
+    ],
+  });
+
   const table = new Table({
     width: { size: 100, type: WidthType.PERCENTAGE },
     rows: [
       new TableRow({
-        children: ["Finding", "Impact", "Urgency"].map(
+        children: ["Finding", "Impact", "Urgency", "Evidence"].map(
           (h) =>
             new TableCell({
+              shading: { type: ShadingType.CLEAR, fill: soft },
               children: [new Paragraph({ children: [new TextRun({ text: h, bold: true, font: "Calibri" })] })],
             })
         ),
@@ -433,7 +548,7 @@ export async function buildAuditDocx(doc: AuditDocument): Promise<Buffer> {
       ...doc.priorities.map(
         (row) =>
           new TableRow({
-            children: [row.finding, row.impact, row.urgency].map(
+            children: [row.finding, row.impact, row.urgency, row.evidence || "—"].map(
               (c) => new TableCell({ children: [new Paragraph({ children: [new TextRun({ text: c, font: "Calibri" })] })] })
             ),
           })
@@ -446,6 +561,9 @@ export async function buildAuditDocx(doc: AuditDocument): Promise<Buffer> {
       {
         properties: {},
         children: [
+          letterhead,
+          accentBar,
+          new Paragraph({ spacing: { after: 200 }, children: [] }),
           p("CONFIDENTIAL CLIENT REVIEW"),
           new Paragraph({
             heading: HeadingLevel.TITLE,
@@ -476,7 +594,10 @@ export async function buildAuditDocx(doc: AuditDocument): Promise<Buffer> {
           p("8. Suggested next step", HeadingLevel.HEADING_1),
           p(doc.nextStep.offer, HeadingLevel.HEADING_2),
           p(doc.nextStep.why),
-          p("This complimentary review is based on publicly visible website evidence. Internal targeting notes are not included."),
+          p(
+            [brand.companyName, brand.website, brand.email, brand.phone].filter(Boolean).join("  ·  ") +
+              `. Complimentary review for ${doc.company}, based on publicly visible website evidence.`
+          ),
         ],
       },
     ],

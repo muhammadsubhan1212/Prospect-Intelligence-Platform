@@ -40,6 +40,7 @@ import {
 } from "./store";
 import type { Activity, ActivityType, LeadStatus, MasterLead, Operator } from "./types";
 import { buildAuditDocument, renderAuditHtml } from "./audit";
+import { loadBrand } from "./brand";
 
 function nowIso() {
   return new Date().toISOString();
@@ -800,28 +801,36 @@ export async function getOperatorDashboard(operatorId: string) {
   const op = await getOperator(operatorId);
   if (!op) return null;
   const { leads } = await loadLeads();
-  const { activities } = await loadActivities();
   const mine = leads.filter((l) => l.assignedTo === operatorId);
   const mineToday = mine.filter((l) => isToday(l.assignedAt));
-  const todayActs = activities.filter((a) => a.userId === operatorId && isToday(a.timestamp));
-  const contactedToday = todayActs.filter((a) => a.type === "email_sent" || a.type === "called").length;
-  const queueSource = mineToday.length ? mineToday : mine;
+  const tags = (l: (typeof mine)[0]) => (l.statuses?.length ? l.statuses : [l.status]);
+  const pool = mineToday.length ? mineToday : mine;
+  const emails = pool.filter((l) => tags(l).includes("sent")).length;
+  const calls = pool.filter((l) => tags(l).includes("called")).length;
+  const replies = pool.filter((l) => tags(l).includes("replied")).length;
+  const meetings = pool.filter((l) => tags(l).includes("meeting")).length;
+  const contactedToday = pool.filter(
+    (l) => isToday(l.lastActionAt) && tags(l).some((s) => s && s !== "not_contacted")
+  ).length;
+  const queueSource = pool;
   return {
     operator: op,
     summary: {
       assignedToday: mineToday.length,
       remainingToday: Math.max(0, (mineToday.length || mine.length) - contactedToday),
       contactedToday,
-      emails: todayActs.filter((a) => a.type === "email_sent").length,
-      calls: todayActs.filter((a) => a.type === "called" || a.type === "call_clicked").length,
-      replies: todayActs.filter((a) => a.type === "replied").length,
-      meetings: todayActs.filter((a) => a.type === "meeting").length,
+      emails,
+      calls,
+      replies,
+      meetings,
       target: GTM.dailySendCap,
       completed: contactedToday,
       remainingCap: Math.max(0, GTM.dailySendCap - contactedToday),
     },
     leads: mine,
-    queue: queueSource.filter((l) => l.status === "not_contacted" || l.status === "sent" || l.status === "called"),
+    queue: queueSource.filter(
+      (l) => tags(l).includes("not_contacted") || tags(l).includes("sent") || tags(l).includes("called") || !l.status
+    ),
   };
 }
 
@@ -851,6 +860,7 @@ export async function recordLeadAction(input: {
   action: ActivityType | string;
   disclosedToAdmin?: boolean;
   note?: string;
+  toggle?: boolean;
   message?: { to?: string; subject?: string; body?: string };
 }) {
   return withOpsLock(async () => {
@@ -863,7 +873,14 @@ export async function recordLeadAction(input: {
     if (lead.assignedTo !== input.operatorId) throw new Error("This lead is not assigned to you");
     const note = String(input.note || "").trim();
     const msg = input.message;
-    const isEmail = input.action === "email_sent" || input.action === "email_opened";
+    const isEmail =
+      input.action === "email_sent" || input.action === "email_opened" || input.action === "email_failed";
+    if (input.action === "called" && note.length < 4) {
+      throw new Error("Enter what was discussed on the call, then confirm Yes.");
+    }
+    if (input.action === "call_no_answer" && note.length < 2) {
+      throw new Error("Enter why the call did not happen, then press No.");
+    }
 
     if (input.action === "lead_opened") {
       const { activities } = await loadActivities();
@@ -882,7 +899,8 @@ export async function recordLeadAction(input: {
       const current = new Set(
         lead.statuses?.length ? lead.statuses : lead.status && lead.status !== "not_contacted" ? [lead.status] : []
       );
-      undone = current.has(next);
+      const canToggle = input.toggle !== false;
+      undone = canToggle && current.has(next);
       if (undone) {
         current.delete(next);
         logType = UNDO_TYPE[input.action] || `${input.action}_cleared`;
@@ -895,14 +913,13 @@ export async function recordLeadAction(input: {
     lead.lastAction = logType;
     lead.lastActionAt = nowIso();
     lead.updatedAt = lead.lastActionAt;
-    const message =
-      isEmail || msg?.subject || msg?.body
-        ? {
-            to: String(msg?.to || lead.email || "").trim() || undefined,
-            subject: String(msg?.subject || "").trim() || undefined,
-            body: String(msg?.body || "").trim() || undefined,
-          }
-        : undefined;
+    const message = isEmail
+      ? {
+          to: String(msg?.to || lead.email || "").trim() || undefined,
+          subject: String(msg?.subject || "").trim() || undefined,
+          body: String(msg?.body || "").trim() || undefined,
+        }
+      : undefined;
     lead.lastDisclosure = {
       at: lead.lastActionAt,
       operatorId: op.id,
@@ -1057,7 +1074,8 @@ export async function createFreeAudit(leadId: string, operatorId?: string) {
     detail = await getMasterLead(leadId);
     data = detail ? await loadResearchJson(detail.lead) : null;
   }
-  const document = buildAuditDocument(detail!.lead, data);
+  const brand = await loadBrand(operatorId);
+  const document = buildAuditDocument(detail!.lead, data, brand);
   const html = renderAuditHtml(document);
   const jsonRel = `ops/audits/${document.id}.json`;
   const htmlRel = `ops/audits/${document.id}.html`;

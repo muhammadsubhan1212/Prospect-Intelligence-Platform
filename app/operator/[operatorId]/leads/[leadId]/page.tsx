@@ -29,6 +29,9 @@ export default function OperatorLeadPage() {
   const [to, setTo] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
+  const [callOpen, setCallOpen] = useState(false);
+  const [callNotes, setCallNotes] = useState("");
+  const [callError, setCallError] = useState("");
 
   async function load() {
     const res = await fetch(`/api/ops/leads/${params.leadId}`);
@@ -76,7 +79,7 @@ export default function OperatorLeadPage() {
     window.setTimeout(() => setToast(""), 2500);
   }
 
-  async function act(action: string, extra?: { openEmail?: boolean }) {
+  async function act(action: string, extra?: { openEmail?: boolean; note?: string; closeCall?: boolean; toggle?: boolean }) {
     setBusy(action);
     setError("");
     try {
@@ -86,20 +89,31 @@ export default function OperatorLeadPage() {
         body: JSON.stringify({
           operatorId: params.operatorId,
           action,
-          note,
-          message: { to, subject, body },
+          note: extra?.note ?? note,
+          toggle: extra?.toggle,
+          message:
+            action === "email_sent" || action === "email_opened" || extra?.openEmail
+              ? { to, subject, body }
+              : undefined,
         }),
       });
       const json = await res.json();
-      if (json.error) setError(json.error);
-      else {
-        if (extra?.openEmail) {
-          const url = buildGmailComposeUrl({ to, subject, body });
-          const win = openGmailComposeWindow(url);
-          if (!win) window.open(url, "_blank");
-        }
-        await load();
+      if (json.error) {
+        setError(json.error);
+        return false;
       }
+      if (extra?.openEmail) {
+        const url = buildGmailComposeUrl({ to, subject, body });
+        const win = openGmailComposeWindow(url);
+        if (!win) window.open(url, "_blank");
+      }
+      if (extra?.closeCall) {
+        setCallOpen(false);
+        setCallNotes("");
+        setCallError("");
+      }
+      await load();
+      return true;
     } finally {
       setBusy("");
     }
@@ -107,17 +121,37 @@ export default function OperatorLeadPage() {
 
   async function call() {
     const phone = lead?.phone || "";
-    if (!phone) {
-      ping("No phone number");
+    if (phone) {
+      try {
+        await navigator.clipboard.writeText(phone);
+        ping("Phone number copied");
+      } catch {
+        ping(phone);
+      }
+    } else {
+      ping("No phone on this lead — still log the call");
+    }
+    setCallNotes(note);
+    setCallError("");
+    setCallOpen(true);
+  }
+
+  async function saveCall(connected: boolean) {
+    const discussed = callNotes.trim();
+    if (connected && discussed.length < 4) {
+      setCallError("Enter what was discussed, then press Yes.");
       return;
     }
-    try {
-      await navigator.clipboard.writeText(phone);
-      ping("Phone number copied");
-    } catch {
-      ping(phone);
+    if (!connected && discussed.length < 2) {
+      setCallError("Enter why the call did not happen, then press No.");
+      return;
     }
-    await act("call_clicked");
+    const ok = await act(connected ? "called" : "call_no_answer", {
+      note: discussed,
+      closeCall: true,
+      toggle: false,
+    });
+    if (ok) ping(connected ? "Call saved" : "Logged as no answer / not connected");
   }
 
   async function research() {
@@ -207,14 +241,14 @@ export default function OperatorLeadPage() {
       </Card>
 
       <div className="mt-4 flex flex-wrap gap-2">
-        <Button size="lg" disabled={!!busy} onClick={() => void act("email_sent", { openEmail: true })}>
+        <Button size="lg" disabled={!!busy} onClick={() => void act("email_opened", { openEmail: true })}>
           Email
         </Button>
         <Button size="lg" variant="secondary" disabled={!!busy} onClick={() => void call()}>
           Call
         </Button>
       </div>
-      <p className="mt-2 text-xs text-muted-foreground">Email opens Gmail with this subject and body.</p>
+      <p className="mt-2 text-xs text-muted-foreground">Email opens Gmail. Press Sent after you actually send.</p>
 
       <div className="mt-4 flex flex-wrap gap-2">
         {OUTCOMES.map((o) => {
@@ -234,6 +268,34 @@ export default function OperatorLeadPage() {
         })}
       </div>
       <p className="mt-2 text-xs text-muted-foreground">Marked statuses stay highlighted. You can tick more than one.</p>
+
+      {callOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setCallOpen(false)}>
+          <Card className="w-full max-w-md space-y-3 p-5" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold">Call {lead.name}</h2>
+            <p className="text-sm text-muted-foreground">{lead.phone ? `Number copied: ${lead.phone}` : "No phone number on this lead."}</p>
+            <textarea
+              className="min-h-28 w-full rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              placeholder="What was discussed on the call?"
+              value={callNotes}
+              onChange={(e) => setCallNotes(e.target.value)}
+            />
+            {callError ? <p className="text-sm text-danger">{callError}</p> : null}
+            <p className="text-xs text-muted-foreground">Did the call happen?</p>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" disabled={!!busy} onClick={() => void saveCall(true)}>
+                Yes — save call
+              </Button>
+              <Button type="button" variant="outline" disabled={!!busy} onClick={() => void saveCall(false)}>
+                No — not connected
+              </Button>
+              <Button type="button" variant="ghost" onClick={() => setCallOpen(false)}>
+                Cancel
+              </Button>
+            </div>
+          </Card>
+        </div>
+      ) : null}
 
       <div className="mt-6">
         {card ? (

@@ -10,6 +10,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       operatorId?: string;
       action?: string;
       note?: string;
+      toggle?: boolean;
       message?: { to?: string; subject?: string; body?: string };
     };
     if (!body.operatorId || !body.action) return jsonError("operatorId and action are required");
@@ -18,6 +19,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       operatorId: body.operatorId,
       action: body.action,
       note: body.note,
+      toggle: body.toggle,
       message: body.message,
     });
     return jsonOk(result);

@@ -10,6 +10,7 @@ const items = [
   { href: "/admin/operators", label: "Operators" },
   { href: "/admin/assign", label: "Assign" },
   { href: "/admin/activity", label: "Activity" },
+  { href: "/admin/brand", label: "Brand" },
 ];
 
 export function OpsNav() {

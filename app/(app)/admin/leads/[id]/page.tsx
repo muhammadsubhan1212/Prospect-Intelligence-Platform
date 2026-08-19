@@ -136,7 +136,7 @@ export default function AdminLeadDetailPage() {
                 {lead.lastDisclosure.action.replace(/_/g, " ")} · {new Date(lead.lastDisclosure.at).toLocaleString()}
               </p>
               {lead.lastDisclosure.note ? <p className="text-sm">{lead.lastDisclosure.note}</p> : null}
-              {lead.lastDisclosure.message ? (
+              {lead.lastDisclosure.action.startsWith("email_") && lead.lastDisclosure.message ? (
                 <div className="rounded-lg bg-muted/50 p-3 text-sm">
                   <div>
                     <span className="text-muted-foreground">To:</span> {lead.lastDisclosure.message.to}
@@ -162,7 +162,7 @@ export default function AdminLeadDetailPage() {
                     <span className="text-muted-foreground">{new Date(a.timestamp).toLocaleString()}</span>
                   </div>
                   {a.metadata?.note ? <p className="mt-1 text-muted-foreground">{a.metadata.note}</p> : null}
-                  {a.metadata?.message?.body ? (
+                  {a.type.startsWith("email_") && a.metadata?.message?.body ? (
                     <div className="mt-2 rounded bg-muted/40 p-2">
                       <div className="text-xs text-muted-foreground">To {a.metadata.message.to}</div>
                       <div className="font-medium">{a.metadata.message.subject}</div>
