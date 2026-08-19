@@ -1,14 +1,11 @@
 /**
  * PHASE 1.1 — Headless-render fallback for JS-heavy (SPA-shell) sites.
  *
- * Pure heuristic detection is dependency-free (no external calls). The actual
- * headless render is optional: it dynamically requires "puppeteer" and, if
- * that package isn't installed, degrades gracefully (returns null) instead
- * of throwing. This keeps the pipeline dependency-free by default while
- * still supporting a real headless render when the operator installs
- * puppeteer (`npm install puppeteer` in prospect-platform).
+ * Pure heuristic detection is dependency-free. The actual headless render is
+ * optional: it dynamically imports "puppeteer" (ESM-only as of v22+) and, if
+ * unavailable, degrades gracefully instead of throwing.
  *
- * Nothing here ever throws — every path returns a safe value.
+ * Never throws — every path returns a safe value.
  */
 
 const MIN_BODY_CHARS = 200;
@@ -55,17 +52,19 @@ function detectSpaShell(html) {
     }
 }
 
-let puppeteerModule; // memoized require result (undefined = not yet tried, null = unavailable)
+/** @type {Promise<any>|null|undefined} undefined=not tried, null=unavailable */
+let puppeteerLoadPromise;
 
+/**
+ * Puppeteer 22+ is ESM-only — must use import(), not require().
+ * Memoized; never throws.
+ */
 function loadPuppeteer() {
-    if (puppeteerModule !== undefined) return puppeteerModule;
-    try {
-        // eslint-disable-next-line global-require
-        puppeteerModule = require("puppeteer");
-    } catch {
-        puppeteerModule = null;
-    }
-    return puppeteerModule;
+    if (puppeteerLoadPromise !== undefined) return puppeteerLoadPromise;
+    puppeteerLoadPromise = import("puppeteer")
+        .then((mod) => mod && (mod.default || mod))
+        .catch(() => null);
+    return puppeteerLoadPromise;
 }
 
 /**
@@ -75,16 +74,17 @@ function loadPuppeteer() {
  */
 async function headlessRenderFetch(url, opts = {}) {
     const timeout = opts.timeout || 15000;
-    const puppeteer = loadPuppeteer();
+    const puppeteer = await loadPuppeteer();
     if (!puppeteer) {
-        return { html: "", ok: false, engine: null, reason: "puppeteer not installed — headless render skipped (npm install puppeteer to enable)" };
+        return {
+            html: "",
+            ok: false,
+            engine: null,
+            reason: "puppeteer not available — headless render skipped",
+        };
     }
     let browser;
     const run = async () => {
-        // FIX 4 — extra flags so the launch also survives constrained/container
-        // hosts (low /dev/shm, no GPU) instead of failing to spawn at all;
-        // this is what was silently starving techGapInsights/competitors/
-        // possibleContacts/etc. of real content on JS-heavy sites.
         browser = await puppeteer.launch({
             headless: "new",
             args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
@@ -98,15 +98,19 @@ async function headlessRenderFetch(url, opts = {}) {
         return { html: html || "", ok: !!html, engine: "puppeteer", reason: "" };
     };
     try {
-        // FIX 4 — the caller-supplied `timeout` bounds page.goto(), but launch()
-        // itself has no such bound; wrap the whole attempt in a hard ceiling so
-        // a stuck browser process can never hang the pipeline indefinitely.
         return await Promise.race([
             run(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error("headless render exceeded overall time budget")), timeout + 10000)),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("headless render exceeded overall time budget")), timeout + 10000)
+            ),
         ]);
     } catch (e) {
-        return { html: "", ok: false, engine: "puppeteer", reason: `headless render failed or timed out: ${String((e && e.message) || e)}` };
+        return {
+            html: "",
+            ok: false,
+            engine: "puppeteer",
+            reason: `headless render failed or timed out: ${String((e && e.message) || e)}`,
+        };
     } finally {
         try {
             if (browser) await browser.close();

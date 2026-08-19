@@ -16,7 +16,7 @@ export async function POST(req: Request) {
       return NextResponse.json(
         {
           error:
-            "CSV is larger than ~95MB. Choose “Load first 1,000 rows” on New Report, or split the file.",
+            "CSV is larger than ~95MB. Choose “Load first 1,000 rows” on New run, or split the file.",
         },
         { status: 413 }
       );

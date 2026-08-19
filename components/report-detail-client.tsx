@@ -5,10 +5,13 @@ import Link from "next/link";
 import { Check, Copy, Download, Maximize2, FileText } from "lucide-react";
 import { Card, Button } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/status-badge";
+import { ActionCardPanel, type ActionCardData } from "@/components/action-card-panel";
 import { formatDate } from "@/lib/utils";
 import { loadCachedReport, type CachedReportPayload } from "@/lib/report-cache";
 
 type ProspectLike = {
+  actionCard?: ActionCardData;
+  outreachOutcome?: { status?: string };
   executiveSummary?: { paragraphs?: string[]; verdict?: string };
   bestFirstOffer?: { offer?: string; why?: string };
   finalRecommendation?: { priority?: string; verdict?: string };
@@ -23,6 +26,7 @@ export function ReportDetailClient({ id }: Props) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [outcome, setOutcome] = useState<string>("not_sent");
 
   useEffect(() => {
     let alive = true;
@@ -35,6 +39,11 @@ export function ReportDetailClient({ id }: Props) {
           const json = (await res.json()) as CachedReportPayload;
           if (!alive) return;
           setPayload(json);
+          const o =
+            (json.report as { outreachOutcome?: { status?: string } })?.outreachOutcome?.status ||
+            (json.data as ProspectLike | undefined)?.outreachOutcome?.status ||
+            "not_sent";
+          setOutcome(o);
           return;
         }
         const cached = loadCachedReport(id);
@@ -84,6 +93,19 @@ export function ReportDetailClient({ id }: Props) {
     window.setTimeout(() => setCopied(false), 2000);
   }
 
+  async function onOutcomeChange(status: "not_sent" | "sent" | "replied" | "meeting" | "not_interested" | "bounced") {
+    setOutcome(status);
+    try {
+      await fetch(`/api/reports/${id}/outcome`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+    } catch {
+      /* keep local selection */
+    }
+  }
+
   if (loading) {
     return <div className="text-sm text-muted-foreground">Loading report…</div>;
   }
@@ -107,6 +129,7 @@ export function ReportDetailClient({ id }: Props) {
   const finalRec = data?.finalRecommendation;
   const audit = data?.websiteAudit;
   const pains = data?.painPoints || [];
+  const card = data?.actionCard;
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -121,41 +144,63 @@ export function ReportDetailClient({ id }: Props) {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {data ? (
-            <Button variant="outline" onClick={() => void copyJson()}>
-              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-              {copied ? "Copied!" : "Copy JSON"}
-            </Button>
+          {report.status === "completed" ? (
+            <a
+              href={`/api/reports/export/sequencer`}
+              onClick={async (e) => {
+                e.preventDefault();
+                const res = await fetch("/api/reports/export/sequencer", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ reportIds: [report.id], decisions: ["CONTACT", "NURTURE"] }),
+                });
+                if (!res.ok) return;
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `sequencer_${report.company || report.id}.csv`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+            >
+              <Button>
+                <Download className="h-4 w-4" />
+                Download Instantly CSV
+              </Button>
+            </a>
           ) : null}
-          {report.status === "completed" && data ? (
+          {report.status === "completed" ? (
             <Link href={`/reports/${report.id}/view`}>
               <Button variant="outline">
                 <Maximize2 className="h-4 w-4" />
-                Web view
+                Full research
               </Button>
             </Link>
           ) : null}
           {report.status === "completed" ? (
             <Link href={`/reports/${report.id}/document`}>
-              <Button>
+              <Button variant="outline">
                 <FileText className="h-4 w-4" />
-                Document view
+                Full dossier (optional)
               </Button>
             </Link>
-          ) : null}
-          {report.status === "completed" ? (
-            <a href={`/api/reports/${report.id}/download`}>
-              <Button variant="outline">
-                <Download className="h-4 w-4" />
-                Download DOCX
-              </Button>
-            </a>
           ) : null}
           <Link href="/reports">
             <Button variant="outline">Back</Button>
           </Link>
         </div>
       </div>
+
+      {report.status === "completed" ? (
+        <ActionCardPanel
+          reportId={report.id}
+          company={report.company}
+          actionCard={card}
+          outcomeStatus={outcome as "not_sent"}
+          onOutcomeChange={onOutcomeChange}
+        />
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-3">
         <Card className="p-4">
@@ -167,30 +212,22 @@ export function ReportDetailClient({ id }: Props) {
         <Card className="p-4">
           <div className="text-xs text-muted-foreground">Priority / Confidence</div>
           <div className="mt-1 text-2xl font-semibold">
-            {report.priority || finalRec?.priority || "—"}
-            {report.confidence != null ? ` · ${report.confidence}%` : ""}
+            {card?.priority || report.priority || finalRec?.priority || "—"}
+            {(card?.confidence ?? report.confidence) != null
+              ? ` · ${card?.confidence ?? report.confidence}%`
+              : ""}
           </div>
         </Card>
         <Card className="p-4">
-          <div className="text-xs text-muted-foreground">Verdict</div>
-          <div className="mt-1 text-2xl font-semibold">{report.verdict || finalRec?.verdict || "—"}</div>
+          <div className="text-xs text-muted-foreground">Decision</div>
+          <div className="mt-1 text-2xl font-semibold">
+            {card?.decision || report.verdict || finalRec?.verdict || "—"}
+          </div>
         </Card>
       </div>
 
       <Card className="space-y-3 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="font-medium">Summary</h2>
-          {data ? (
-            <div className="flex gap-3 text-sm">
-              <Link href={`/reports/${report.id}/view`} className="text-accent hover:underline">
-                Web view →
-              </Link>
-              <Link href={`/reports/${report.id}/document`} className="text-accent hover:underline">
-                Document view →
-              </Link>
-            </div>
-          ) : null}
-        </div>
+        <h2 className="font-medium">Research snapshot</h2>
         {(exec?.paragraphs || []).map((p, i) => (
           <p key={i} className="text-sm text-muted-foreground">
             {p}
@@ -203,30 +240,12 @@ export function ReportDetailClient({ id }: Props) {
 
       <Card className="space-y-2 p-5">
         <h2 className="font-medium">Best first offer</h2>
-        <p className="text-sm font-medium text-accent">{report.firstOffer || offer?.offer || "—"}</p>
-        {offer?.why ? <p className="text-sm text-muted-foreground">{offer.why}</p> : null}
-      </Card>
-
-      <Card className="p-5">
-        <h2 className="mb-3 font-medium">Contact & web</h2>
-        <dl className="grid gap-2 text-sm sm:grid-cols-2">
-          <div>
-            <dt className="text-muted-foreground">Email</dt>
-            <dd>{report.email || "—"}</dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">Website</dt>
-            <dd className="break-all">{report.website || audit?.analyzedUrl || "—"}</dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">LinkedIn</dt>
-            <dd className="break-all">{report.linkedin || "—"}</dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">Industry</dt>
-            <dd>{report.industry || "—"}</dd>
-          </div>
-        </dl>
+        <p className="text-sm font-medium text-accent">
+          {card?.firstOffer || report.firstOffer || offer?.offer || "—"}
+        </p>
+        {card?.offerWhy || offer?.why ? (
+          <p className="text-sm text-muted-foreground">{card?.offerWhy || offer?.why}</p>
+        ) : null}
       </Card>
 
       <Card className="p-5">
@@ -249,9 +268,7 @@ export function ReportDetailClient({ id }: Props) {
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="font-medium">Research JSON</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              Copy and paste into your own AI for sales verification or deeper analysis.
-            </p>
+            <p className="mt-0.5 text-xs text-muted-foreground">Power-user archive — not the primary action surface.</p>
           </div>
           {data ? (
             <Button size="sm" variant="outline" onClick={() => void copyJson()}>
@@ -261,8 +278,8 @@ export function ReportDetailClient({ id }: Props) {
           ) : null}
         </div>
         {data ? (
-          <pre className="max-h-[480px] overflow-auto rounded-lg bg-muted p-4 text-xs leading-relaxed">
-            {JSON.stringify(data, null, 2)}
+          <pre className="max-h-[320px] overflow-auto rounded-lg bg-muted p-4 text-xs leading-relaxed">
+            {JSON.stringify(data.actionCard || data, null, 2)}
           </pre>
         ) : (
           <p className="text-sm text-muted-foreground">Metadata JSON not available for this report.</p>
@@ -273,9 +290,6 @@ export function ReportDetailClient({ id }: Props) {
         <Card className="border-danger/40 p-5">
           <h2 className="mb-2 font-medium text-danger">Error</h2>
           <p className="text-sm">{report.error}</p>
-          {report.stack ? (
-            <pre className="mt-3 max-h-60 overflow-auto text-xs text-muted-foreground">{String(report.stack)}</pre>
-          ) : null}
         </Card>
       ) : null}
     </div>

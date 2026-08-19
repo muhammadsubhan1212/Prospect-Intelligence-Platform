@@ -9,14 +9,22 @@ import {
   LARGE_CSV_ROW_THRESHOLD,
   LARGE_CSV_SIZE_BYTES,
   VERCEL_SAFE_UPLOAD_BYTES,
+  OFFER_FOCUS_OPTIONS,
+  MAX_OFFER_FOCUS,
+  DEFAULT_ICP,
   clearNewReportSession,
   estimateCsvRows,
+  icpFormToOptions,
+  loadIcpLocal,
   loadNewReportSession,
   readUploadError,
+  saveIcpLocal,
   saveNewReportSession,
   truncateCsvFile,
+  type IcpFormState,
   type NewReportSession,
 } from "@/lib/new-report-session";
+import { GTM } from "@/lib/gtm-defaults";
 import {
   deleteCsvText,
   loadCsvText,
@@ -75,6 +83,8 @@ function NewReportInner() {
   const [generating, setGenerating] = useState(false);
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [largePrompt, setLargePrompt] = useState<LargePrompt | null>(null);
+  const [icpOpen, setIcpOpen] = useState(true);
+  const [icp, setIcp] = useState<IcpFormState>(DEFAULT_ICP);
 
   const fetchPage = useCallback(
     async (uploadId: string, nextPage: number, nextSize: number, q: string) => {
@@ -133,6 +143,13 @@ function NewReportInner() {
     let cancelled = false;
     (async () => {
       const saved = loadNewReportSession();
+      const savedIcp = saved?.icp || loadIcpLocal() || DEFAULT_ICP;
+      if (!cancelled) {
+        const merged = { ...DEFAULT_ICP, ...savedIcp };
+        merged.offerFocus = (merged.offerFocus || []).slice(0, MAX_OFFER_FOCUS);
+        setIcp(merged);
+        setIcpOpen(true);
+      }
       if (!saved?.uploadId) {
         if (!cancelled) setRestoring(false);
         return;
@@ -196,10 +213,12 @@ function NewReportInner() {
       email,
       company,
       timeoutMs,
+      icp,
       savedAt: new Date().toISOString(),
     };
     saveNewReportSession(session);
-  }, [upload, mode, row, rowFrom, rowTo, limit, email, company, timeoutMs, restoring]);
+    saveIcpLocal(icp);
+  }, [upload, mode, row, rowFrom, rowTo, limit, email, company, timeoutMs, icp, restoring]);
 
   const uploadFile = useCallback(
     async (file: File, maxRows?: number) => {
@@ -323,12 +342,62 @@ function NewReportInner() {
     if (mode === "email") options.email = email;
     if (mode === "company") options.company = company;
 
+    const { icpProfile, offerFocus } = icpFormToOptions(icp);
+    options.icpProfile = icpProfile;
+    if (offerFocus.length) options.offerFocus = offerFocus;
+    saveIcpLocal(icp);
+
     try {
-      // Re-send CSV in the same request so generation does not depend on another instance's /tmp
       let file = csvFile;
       if (!file) {
         const local = await loadCsvText(upload.id);
         if (local?.text) file = new File([local.text], upload.filename, { type: "text/csv" });
+      }
+
+      // Check for already-analyzed / already-sent overlaps before spending research time
+      let replaceExisting = false;
+      {
+        let checkRes: Response;
+        if (file) {
+          const form = new FormData();
+          form.append("file", file);
+          form.append("uploadId", upload.id);
+          form.append("options", JSON.stringify(options));
+          checkRes = await fetch("/api/reports/check-overlap", { method: "POST", body: form });
+        } else {
+          checkRes = await fetch("/api/reports/check-overlap", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ uploadId: upload.id, options }),
+          });
+        }
+        const check = await checkRes.json();
+        if (checkRes.ok && (check.alreadyAnalyzed?.length || check.priorFilenameBatches?.length)) {
+          const analyzed = check.alreadyAnalyzed?.length || 0;
+          const sent = check.alreadySent?.length || 0;
+          const samples = (check.alreadyAnalyzed || [])
+            .slice(0, 8)
+            .map(
+              (m: { company?: string; email?: string; alreadySent?: boolean }) =>
+                `• ${m.company || "—"}${m.email ? ` <${m.email}>` : ""}${m.alreadySent ? " (already sent)" : ""}`
+            )
+            .join("\n");
+          const msg =
+            `${analyzed} contact(s) in this selection were already analyzed` +
+            (sent ? ` (${sent} already emailed)` : "") +
+            `.\n\n` +
+            (samples ? `${samples}${analyzed > 8 ? "\n• …" : ""}\n\n` : "") +
+            `Re-analyzing will REPLACE prior unsent reports (old Action Cards / DOCX removed).\n` +
+            (sent
+              ? `Already-sent contacts are kept for tracking and will be skipped in Send Queue.\n\n`
+              : `\n`) +
+            `Continue?`;
+          if (!confirm(msg)) {
+            setGenerating(false);
+            return;
+          }
+          replaceExisting = true;
+        }
       }
 
       let res: Response;
@@ -337,12 +406,13 @@ function NewReportInner() {
         form.append("file", file);
         form.append("uploadId", upload.id);
         form.append("options", JSON.stringify(options));
+        if (replaceExisting) form.append("replaceExisting", "1");
         res = await fetch("/api/report/generate", { method: "POST", body: form });
       } else {
         res = await fetch("/api/report/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ uploadId: upload.id, options }),
+          body: JSON.stringify({ uploadId: upload.id, options, replaceExisting }),
         });
       }
       const json = await res.json();
@@ -360,7 +430,14 @@ function NewReportInner() {
         if (completed.length === 1) {
           router.push(`/reports/${completed[0].id}`);
         } else {
-          router.push(`/reports/processing/${json.batch.id}`);
+          const contacts = completed.filter(
+            (r: { decision?: string }) => (r.decision || "CONTACT") === "CONTACT"
+          );
+          if (contacts.length > 0) {
+            router.push(`/reports/sending/${json.batch.id}`);
+          } else {
+            router.push(`/reports/processing/${json.batch.id}`);
+          }
         }
       }
     } catch (e) {
@@ -380,9 +457,9 @@ function NewReportInner() {
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">New Report</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">New run</h1>
         <p className="text-sm text-muted-foreground">
-          Upload a CSV — browse all rows with pagination & search. Your upload stays in this tab until you clear it.
+          Upload a lead CSV → Instantly-ready CONTACT list (who to SKIP, who to email, subject + body). DOCX is optional archive only.
         </p>
       </div>
 
@@ -506,6 +583,51 @@ function NewReportInner() {
           </Card>
 
           <Card className="space-y-4 p-5">
+            <h2 className="font-medium">Bulk analyze presets</h2>
+            <p className="text-sm text-muted-foreground">
+              One-click sets All rows + limit. Large runs may hit serverless timeouts — use 50, then “Analyze next 50”.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  const mins = Math.round(50 * GTM.analyzeMinutesPerLead);
+                  if (
+                    !confirm(
+                      `Analyze 50 leads (~${mins} min)? May need Vercel Pro maxDuration. Prefer chunking if unsure.`
+                    )
+                  ) {
+                    return;
+                  }
+                  setMode("all");
+                  setLimit("50");
+                }}
+              >
+                Analyze 50
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  const mins = Math.round(100 * GTM.analyzeMinutesPerLead);
+                  if (
+                    !confirm(
+                      `Analyze 100 leads (~${mins} min)? High timeout risk on serverless — consider two × 50 runs.`
+                    )
+                  ) {
+                    return;
+                  }
+                  setMode("all");
+                  setLimit("100");
+                }}
+              >
+                Analyze 100
+              </Button>
+            </div>
+          </Card>
+
+          <Card className="space-y-4 p-5">
             <h2 className="font-medium">Selection (CLI parity)</h2>
             <div className="flex flex-wrap gap-2">
               {(
@@ -549,9 +671,53 @@ function NewReportInner() {
               </div>
             ) : null}
             {mode === "all" ? (
-              <div className="max-w-xs space-y-2">
-                <Label>Limit (--limit)</Label>
-                <Input value={limit} onChange={(e) => setLimit(e.target.value)} type="number" min={1} />
+              <div className="space-y-3">
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      const mins = Math.round(50 * GTM.analyzeMinutesPerLead);
+                      if (
+                        !confirm(
+                          `Analyze first 50 rows? Roughly ~${mins} min. On Vercel this may need Pro timeout — or run Analyze 50 twice (chunking).`
+                        )
+                      ) {
+                        return;
+                      }
+                      setLimit("50");
+                    }}
+                  >
+                    Analyze 50
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      const mins = Math.round(100 * GTM.analyzeMinutesPerLead);
+                      if (
+                        !confirm(
+                          `Analyze first 100 rows? Roughly ~${mins} min / high timeout risk. Prefer Analyze 50 twice if on serverless.`
+                        )
+                      ) {
+                        return;
+                      }
+                      setLimit("100");
+                    }}
+                  >
+                    Analyze 100
+                  </Button>
+                </div>
+                <div className="max-w-xs space-y-2">
+                  <Label>Custom limit (--limit)</Label>
+                  <Input value={limit} onChange={(e) => setLimit(e.target.value)} type="number" min={1} />
+                  <p className="text-xs text-muted-foreground">
+                    Est. ~{Math.round((parseInt(limit, 10) || 0) * GTM.analyzeMinutesPerLead)} min. Chunk with 50 if
+                    timeouts.
+                  </p>
+                </div>
               </div>
             ) : null}
             {mode === "email" ? (
@@ -570,8 +736,117 @@ function NewReportInner() {
               <Label>Fetch timeout (ms)</Label>
               <Input value={timeoutMs} onChange={(e) => setTimeoutMs(e.target.value)} type="number" />
             </div>
+          </Card>
+
+          <Card className="space-y-4 p-5">
+            <button
+              type="button"
+              className="flex w-full items-center justify-between text-left"
+              onClick={() => setIcpOpen((v) => !v)}
+            >
+              <div>
+                <h2 className="font-medium">ICP & offer focus</h2>
+                <p className="text-xs text-muted-foreground">
+                  Defaults for {GTM.nicheLabel}. Edit anytime — saved for next run. Max {MAX_OFFER_FOCUS} offers.
+                </p>
+              </div>
+              <span className="text-sm text-accent">{icpOpen ? "Hide" : "Show"}</span>
+            </button>
+            {icpOpen ? (
+              <div className="space-y-4 border-t border-border pt-4">
+                <div className="space-y-2">
+                  <Label>Target industries (comma-separated)</Label>
+                  <Input
+                    value={icp.targetIndustries}
+                    onChange={(e) => setIcp((p) => ({ ...p, targetIndustries: e.target.value }))}
+                    placeholder="real estate, SaaS, dental"
+                  />
+                </div>
+                <div className="flex flex-wrap gap-4">
+                  <div className="space-y-2">
+                    <Label>Min employees</Label>
+                    <Input
+                      type="number"
+                      className="w-28"
+                      value={icp.minEmployees}
+                      onChange={(e) => setIcp((p) => ({ ...p, minEmployees: e.target.value }))}
+                      placeholder="1"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Max employees</Label>
+                    <Input
+                      type="number"
+                      className="w-28"
+                      value={icp.maxEmployees}
+                      onChange={(e) => setIcp((p) => ({ ...p, maxEmployees: e.target.value }))}
+                      placeholder="50"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>Geographies</Label>
+                  <Input
+                    value={icp.geographies}
+                    onChange={(e) => setIcp((p) => ({ ...p, geographies: e.target.value }))}
+                    placeholder="United Kingdom, United States"
+                  />
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>Tech must-have</Label>
+                    <Input
+                      value={icp.techMustHave}
+                      onChange={(e) => setIcp((p) => ({ ...p, techMustHave: e.target.value }))}
+                      placeholder="Shopify"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Tech must-not-have</Label>
+                    <Input
+                      value={icp.techMustNotHave}
+                      onChange={(e) => setIcp((p) => ({ ...p, techMustNotHave: e.target.value }))}
+                      placeholder="Salesforce"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>
+                    Offers you sell this month ({icp.offerFocus.length}/{MAX_OFFER_FOCUS})
+                  </Label>
+                  <div className="flex flex-wrap gap-2">
+                    {OFFER_FOCUS_OPTIONS.map((o) => {
+                      const on = icp.offerFocus.includes(o.id);
+                      const atCap = !on && icp.offerFocus.length >= MAX_OFFER_FOCUS;
+                      return (
+                        <button
+                          key={o.id}
+                          type="button"
+                          disabled={atCap}
+                          title={atCap ? `Select at most ${MAX_OFFER_FOCUS}` : undefined}
+                          onClick={() =>
+                            setIcp((p) => {
+                              if (on) {
+                                return { ...p, offerFocus: p.offerFocus.filter((x) => x !== o.id) };
+                              }
+                              if (p.offerFocus.length >= MAX_OFFER_FOCUS) return p;
+                              return { ...p, offerFocus: [...p.offerFocus, o.id] };
+                            })
+                          }
+                          className={`rounded-lg border px-3 py-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-40 ${
+                            on ? "border-accent bg-accent/10 text-accent" : "border-border hover:bg-muted"
+                          }`}
+                        >
+                          {o.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            ) : null}
             <Button onClick={onGenerate} disabled={generating}>
-              {generating ? "Researching & generating… (1–2 min)" : "Generate"}
+              {generating ? "Researching & generating… (1–2 min)" : "Generate action list"}
             </Button>
           </Card>
 

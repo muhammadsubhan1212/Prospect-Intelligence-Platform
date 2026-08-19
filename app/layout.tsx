@@ -13,8 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Prospect Intelligence Platform",
-  description: "Upload leads, research companies, and download Prospect Intelligence DOCX reports.",
+  title: "Outreach Action — CONTACT list builder",
+  description:
+    "Upload a lead CSV → Instantly-ready CONTACT list (who to skip, who to email, subject + body) → track replies and meetings.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

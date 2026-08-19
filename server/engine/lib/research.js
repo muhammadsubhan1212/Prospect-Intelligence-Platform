@@ -358,11 +358,20 @@ const GENERIC_NAV = new Set([
     "learn more", "read more", "menu", "search", "team", "our team", "portfolio", "work",
     "case studies", "customers", "clients", "press", "media", "events", "webinars", "guides",
     "help center", "knowledge base", "contact us", "get in touch", "our story", "mission",
+    // Section headings / slogan fragments mistaken for services
+    "areas of expertise", "area of expertise", "what we do", "how we help", "our approach",
+    "our process", "why us", "why choose us", "get in touch", "enquire now", "enquire",
+    "save time & money", "save time and money", "market knowledge & network", "create value",
+    "thames valley", "west london",
 ]);
 
 function isGeneric(text) {
     const t = String(text).toLowerCase().replace(/\s+/g, " ").trim().replace(/\s+pages?$/, "");
-    return GENERIC_NAV.has(t);
+    if (GENERIC_NAV.has(t)) return true;
+    // ALL-CAPS marketing slogans ("SAVE TIME & MONEY")
+    if (/^[A-Z0-9][A-Z0-9\s&!'’-]{2,}$/.test(String(text).trim()) && String(text).trim().length <= 40) return true;
+    if (/\b(save time|create value|market knowledge|areas? of expertise)\b/i.test(t)) return true;
+    return false;
 }
 
 function extractServices(anchors, servicesHtml, jsonLdServices = [], jsonLdOffers = []) {
@@ -1068,8 +1077,17 @@ function discoverPages(anchors, baseUrl) {
 }
 
 function extractAddressText(html) {
-    const m = html.match(/\b\d{1,5}\s+[A-Za-z0-9.\-'\s]{3,40}\b(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Way|Court|Ct|Suite|Ste|Highway|Hwy|Parkway|Pkwy)\b[A-Za-z0-9.,\-'\s]{0,40}/i);
-    return m ? stripTags(m[0]).replace(/\s+/g, " ").trim() : "";
+    // Stop at sentence punctuation / HTML so we don't swallow following prose
+    // ("Winnersh. His strong negotiation skill…").
+    const m = html.match(
+        /\b\d{1,5}\s+[A-Za-z0-9.\-'][A-Za-z0-9.\-'\s]{2,40}?\b(?:Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Boulevard|Blvd\.?|Lane|Ln\.?|Drive|Dr\.?|Way|Court|Ct\.?|Suite|Ste\.?|Highway|Hwy\.?|Parkway|Pkwy\.?)\b(?:\s*,?\s*[A-Za-z][A-Za-z\s-]{1,30})?(?:\s*,?\s*[A-Z]{0,2}\d[A-Z0-9\s]{2,7})?/i
+    );
+    if (!m) return "";
+    let addr = stripTags(m[0]).replace(/\s+/g, " ").trim();
+    // Cut at first period that looks like end of sentence (not St. / Ave.)
+    addr = addr.replace(/(?<!\b(?:St|Ave|Rd|Dr|Ln|Ct|Blvd|Hwy|Pkwy))\.\s+[A-Z].*$/, "").trim();
+    if (addr.length > 90) addr = addr.slice(0, 90).replace(/\s+\S*$/, "");
+    return addr;
 }
 
 function countBlogPosts(blogHtml) {

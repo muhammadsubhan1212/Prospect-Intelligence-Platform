@@ -25,6 +25,7 @@ export const PATHS = {
   jobs: () => path.join(storageRoot(), "jobs"),
   batches: () => path.join(storageRoot(), "batches"),
   index: () => path.join(storageRoot(), "index.json"),
+  ops: () => path.join(storageRoot(), "ops"),
 };
 
 export function ensureDirs() {
@@ -35,6 +36,7 @@ export function ensureDirs() {
     PATHS.logs(),
     PATHS.jobs(),
     PATHS.batches(),
+    PATHS.ops(),
   ]) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   }

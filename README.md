@@ -1,20 +1,17 @@
-# Prospect Intelligence Platform
+# Outreach Action
 
-Web UI around the existing CLI Prospect Intelligence engine. **Business logic is unchanged** — the same `csv.js`, `research.js`, `strategy.js`, and DOCX generator run under `server/engine/`.
+Upload a lead CSV → get an **Instantly-ready CONTACT list** (who to skip, who to email, subject + body) → track replies and meetings.
 
-## Architecture
+DOCX / full research dossiers stay available as **optional archive** — they are not the product.
 
-```
-Browser UI
-  → API Routes (/api/…)
-    → Services (csv / report)
-      → server/engine (existing CommonJS pipeline)
-        → research → strategy → renderReport → DOCX
-```
+## What you get
 
-No login — the app opens straight to the dashboard. Suitable for a private/internal deploy URL.
+1. **Action Card** per lead: `CONTACT` | `NURTURE` | `SKIP`
+2. One offer angle + Instantly/Apollo-friendly email fields
+3. **Download Instantly CSV** for CONTACT rows (one click from batch / dashboard)
+4. Mark outcomes (`sent` → `replied` → `meeting`) and see reply/meeting rates on the dashboard
 
-## Local development
+## Quick start
 
 ```bash
 cd prospect-platform
@@ -23,31 +20,47 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:3000 — redirects to `/dashboard`.
+Open http://localhost:3000 → **New run** → upload CSV → set ICP (defaults prefilled for UK property SMBs) → **Generate action list** → **Download Instantly CSV**.
 
-### CLI (still available)
+### Operator loop (Rule of 100)
+
+1. Generate a batch  
+2. Export last CONTACT CSV from the dashboard  
+3. Send in Instantly (or Gmail from the Action Card)  
+4. Mark outcomes on each Action Card  
+5. Watch reply % / meeting % and progress toward 100 touches  
+
+## Architecture
+
+```
+Browser UI (Action Cards + Instantly export)
+  → API Routes (/api/…)
+    → Services (csv / report)
+      → server/engine (research → strategy → actionCard → optional DOCX)
+```
+
+No login — private/internal deploy. Suitable for a single operator team.
+
+## CLI (unchanged)
 
 ```bash
-npm run engine -- --csv "..\google_contacts_prep\output_test\whatsapp_present_full.csv" --row 1
+npm run engine -- --csv path/to/leads.csv --row 1
 ```
+
+Still writes JSON + DOCX including `actionCard`.
 
 ## Deploy to Vercel
 
-1. Push this repo (or the `prospect-platform` folder as the project root).
-2. **Create a Blob store** in the Vercel project (Storage → Blob → Create → Connect). This injects `BLOB_READ_WRITE_TOKEN` so CSV uploads and reports survive across serverless instances. **Required** — without it, Generate succeeds then the report page 404s because the next request hits a different machine with an empty `/tmp`.
-3. No auth env vars required.
-4. Deploy. Hobby plans have shorter function timeouts — Pro recommended for multi-row batches.
+1. Push this repo (project root = `prospect-platform`).
+2. **Create a Blob store** (Storage → Blob → Connect) so uploads/reports persist across serverless instances.
+3. Deploy. Pro recommended for multi-row batches (`maxDuration` 300s).
 
-**Storage note:** On Vercel the filesystem under `/tmp` is ephemeral. Local/dev uses `./storage/`. For durable production files, point `STORAGE_ROOT` at a mounted volume or swap the path helpers for Vercel Blob / S3 (services already isolate I/O).
+## Features
 
-## Features mapped from CLI
-
-| CLI | UI |
-|-----|----|
-| `--row N` | Specific row |
-| `--all --limit N` | All rows + limit |
-| `--email` / `--company` | By email / company |
-| `--timeout` | Timeout field |
-| `--save-json` | Always on for web jobs |
-
-CSV index labels (`Test-R34`, `Unnamed: 46`, …) still ignored via existing `lib/csv.js` rules.
+| Goal | Where |
+|------|--------|
+| CONTACT / SKIP / NURTURE | Action Card on report detail |
+| Instantly CSV | Dashboard, batch results, bulk bar |
+| ICP + offer focus (max 3) | New run |
+| Reply / meeting proof | Dashboard scoreboard (30d) |
+| Full dossier DOCX | Secondary link — optional archive |

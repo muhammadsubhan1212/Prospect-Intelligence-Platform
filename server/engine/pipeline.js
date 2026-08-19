@@ -15,6 +15,7 @@ const {
     decideStrategy,
     generateMessages,
     buildProspectData,
+    buildUnreachableSkipData,
 } = require("./lib/strategy");
 const { renderReport, safeFileName } = require("./Prospect_Intelligence_Report_Generator");
 
@@ -25,7 +26,9 @@ const { renderReport, safeFileName } = require("./Prospect_Intelligence_Report_G
  * @param {string} [opts.outDir] - where to write the .docx
  * @param {string} [opts.jsonDir] - where to write prospect_data JSON (if saveJson)
  * @param {boolean} [opts.saveJson]
- * @param {object} [opts.icpProfile] - optional Phase 3.1 ICP profile ({targetIndustries, minEmployees, maxEmployees, geographies, techMustHave, techMustNotHave})
+ * @param {object} [opts.icpProfile] - optional ICP profile
+ * @param {string[]} [opts.offerFocus] - soft boost offer ids/names
+ * @param {Record<string, number>} [opts.offerUsageCounts] - in-batch frequency map
  * @param {(stage: string, message: string, extra?: object) => void} [opts.onProgress]
  * @returns {Promise<{ outPath: string, data: object, analysis: object, strat: object, research: object }>}
  */
@@ -38,7 +41,15 @@ async function processLead(lead, opts = {}) {
     const label = `${lead.fullName || "(no name)"} @ ${lead.company || "(no company)"}`;
     onProgress("researching", `Researching: ${label}`, { website: lead.website || null });
 
-    let research = await researchWebsite(lead, { timeout });
+    // Missing website → SKIP action card (no invented strategy).
+    if (!lead.website) {
+        const reason =
+            "Incomplete research: no website URL on this lead. A reachable company website is required.";
+        onProgress("analyzing", "SKIP — no website URL");
+        return finalizeSkip(lead, null, reason, opts, onProgress);
+    }
+
+    let research = await researchWebsite(lead, { timeout, icpProfile: opts.icpProfile });
 
     // One automatic retry — transient blocks / slow TLS often succeed on a second pass.
     if (research.website && !research.reachable) {
@@ -48,31 +59,18 @@ async function processLead(lead, opts = {}) {
             `Homepage fetch failed — retrying once (${retryTimeout} ms timeout)…`,
             { status: research.homepage && research.homepage.status }
         );
-        research = await researchWebsite(lead, { timeout: retryTimeout });
+        research = await researchWebsite(lead, { timeout: retryTimeout, icpProfile: opts.icpProfile });
     }
 
-    // Hard stop: never invent a full sales strategy / DOCX from an empty crawl.
+    // Unreachable site → SKIP action card (still write JSON + thin DOCX).
     if (research.website && !research.reachable) {
-        const detail = (research.notes && research.notes.length)
-            ? research.notes.join(" ")
-            : "status 0 / fetch failed";
-        const err = new Error(
-            `Incomplete research: could not load ${research.website}. ${detail} ` +
-                "No sales strategy or DOCX was generated — fix the URL or re-run when the site is reachable."
-        );
-        err.code = "INCOMPLETE_RESEARCH";
-        onProgress("failed", err.message);
-        throw err;
-    }
-
-    if (!research.website) {
-        const err = new Error(
-            "Incomplete research: no website URL on this lead. " +
-                "A reachable company website is required before generating a Prospect Intelligence Report."
-        );
-        err.code = "INCOMPLETE_RESEARCH";
-        onProgress("failed", err.message);
-        throw err;
+        const detail =
+            research.notes && research.notes.length
+                ? research.notes.join(" ")
+                : "status 0 / fetch failed";
+        const reason = `Could not load ${research.website}. ${detail}`;
+        onProgress("analyzing", `SKIP — unreachable site`, { website: research.website });
+        return finalizeSkip(lead, research, reason, opts, onProgress);
     }
 
     if (research.reachable) {
@@ -84,27 +82,59 @@ async function processLead(lead, opts = {}) {
 
     onProgress("analyzing", "Analyzing website and deciding strategy...");
     const analysis = analyzeWebsite(research);
-    // PHASE 3.1 — optional, one-time-configurable ICP profile for this
-    // engagement (opts.icpProfile). Purely additive: decideStrategy() still
-    // works identically for every existing caller that doesn't pass it.
-    const strat = decideStrategy(lead, research, analysis, { icpProfile: opts.icpProfile });
+    const strat = decideStrategy(lead, research, analysis, {
+        icpProfile: opts.icpProfile,
+        offerFocus: opts.offerFocus,
+        offerUsageCounts: opts.offerUsageCounts,
+    });
     const messages = generateMessages(lead, research, analysis, strat);
     const data = buildProspectData(lead, research, analysis, strat, messages);
+
+    // Track offer usage for in-batch diversity (caller owns the shared map).
+    if (opts.offerUsageCounts && strat.best && strat.best.id) {
+        opts.offerUsageCounts[strat.best.id] = (opts.offerUsageCounts[strat.best.id] || 0) + 1;
+    }
 
     onProgress("analyzing", `Website score ${analysis.overallScore}/100 · Offer: ${strat.best.name}`, {
         score: analysis.overallScore,
         offer: strat.best.name,
-        priority: strat.priority,
-        confidence: strat.confidence,
+        priority: data.actionCard ? data.actionCard.priority : strat.priority,
+        confidence: data.actionCard ? data.actionCard.confidence : strat.confidence,
+        decision: data.actionCard ? data.actionCard.decision : undefined,
     });
 
-    // PHASE 2.5/3.6 — DISQUALIFIED/NURTURE are visible, separate categories.
-    // They still get a full report (never silently dropped) — only the
-    // pipelineBucket annotation changes (STRICT RULE: report generation must
-    // never halt or error out, and buckets must not remove leads from totals).
     if (data.pipelineBucket && data.pipelineBucket !== "STANDARD") {
         onProgress("analyzing", `Pipeline bucket: ${data.pipelineBucket}`, { bucket: data.pipelineBucket });
     }
+
+    return writeOutputs(lead, data, analysis, strat, research, opts, onProgress);
+}
+
+async function finalizeSkip(lead, research, reason, opts, onProgress) {
+    const buildSkip =
+        typeof buildUnreachableSkipData === "function"
+            ? buildUnreachableSkipData
+            : null;
+    if (!buildSkip) {
+        const err = new Error(reason);
+        err.code = "INCOMPLETE_RESEARCH";
+        onProgress("failed", err.message);
+        throw err;
+    }
+    const data = buildSkip(lead, research || { website: lead.website }, reason);
+    const analysis = { overallScore: 0, sections: [], summary: reason, reachable: false };
+    const strat = {
+        best: { name: "—", id: "skip", score: 0, evidence: reason },
+        priority: "Low",
+        confidence: 0,
+        verdict: "NO",
+    };
+    return writeOutputs(lead, data, analysis, strat, research || {}, opts, onProgress);
+}
+
+async function writeOutputs(lead, data, analysis, strat, research, opts, onProgress) {
+    const outDir = opts.outDir;
+    const jsonDir = opts.jsonDir;
 
     if (opts.saveJson !== false && jsonDir) {
         if (!fs.existsSync(jsonDir)) fs.mkdirSync(jsonDir, { recursive: true });

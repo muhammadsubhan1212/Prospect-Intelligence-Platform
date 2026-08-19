@@ -32,6 +32,64 @@ try { TechL = require("./techIntel"); } catch { /* keep {} */ }
 try { ConfidenceL = require("./confidenceModel"); } catch { /* keep {} */ }
 try { MessagingL = require("./messagingV2"); } catch { /* keep {} */ }
 try { DedupeL = require("./dedupe"); } catch { /* keep {} */ }
+let ActionCardL = {};
+try { ActionCardL = require("./actionCard"); } catch { /* keep {} */ }
+let DeliverabilityL = {};
+try { DeliverabilityL = require("./deliverability"); } catch { /* keep {} */ }
+
+/** Soft industry → offer boosts (anti-spam / niche-aware re-rank). Additive only. */
+const INDUSTRY_OFFER_BOOSTS = {
+    real_estate: { landing_cro: 2.5, followup_automation: 1.5, crm_automation: 1, ai_chatbot: -1 },
+    property: { landing_cro: 2.5, followup_automation: 1.5, crm_automation: 1, ai_chatbot: -1 },
+    saas: { saas_demo_booking: 3, landing_cro: 1.5, crm_automation: 1, ai_chatbot: 0.5 },
+    software: { saas_demo_booking: 2.5, landing_cro: 1, crm_automation: 1 },
+    dental: { appointment_booking: 3, review_automation: 2, ai_chatbot: 0.5 },
+    legal: { appointment_booking: 2.5, landing_cro: 1.5, followup_automation: 1 },
+    ecommerce: { ecom_email_automation: 3, landing_cro: 1.5, review_automation: 1 },
+    retail: { ecom_email_automation: 2, landing_cro: 1.5 },
+    construction: { review_automation: 2, followup_automation: 1.5, appointment_booking: 1, ai_chatbot: -0.5 },
+    trades: { review_automation: 2.5, appointment_booking: 2, followup_automation: 1.5, ai_chatbot: -0.5 },
+    electrician: { review_automation: 2.5, appointment_booking: 2, followup_automation: 1 },
+    plumbing: { review_automation: 2.5, appointment_booking: 2, followup_automation: 1 },
+    restaurant: { appointment_booking: 2.5, review_automation: 2 },
+    agency: { landing_cro: 2, crm_automation: 1.5, followup_automation: 1 },
+    finance: { crm_automation: 2, landing_cro: 1.5, followup_automation: 1 },
+    wealth: { crm_automation: 2, followup_automation: 1.5 },
+};
+
+function resolveIndustryCluster(lead, research) {
+    const hay = lc([
+        lead && lead.industry,
+        (lead && lead.keywords && lead.keywords.join(" ")) || "",
+        (research && research.facts && research.facts.services && research.facts.services.join(" ")) || "",
+    ].join(" "));
+    for (const key of Object.keys(INDUSTRY_OFFER_BOOSTS)) {
+        if (hay.includes(key.replace(/_/g, " ")) || hay.includes(key)) return key;
+    }
+    if (/\breal\s*estate|property|estate\s*agent|leasing\b/.test(hay)) return "real_estate";
+    if (/\bsaas|software|platform\b/.test(hay)) return "saas";
+    if (/\bconstruct|remodel|hvac|electric|plumb|roof\b/.test(hay)) return "trades";
+    return null;
+}
+
+/** Prefer Apollo keywords over scraped nav/slogan noise for outreach copy. */
+function isBadMessagingService(s) {
+    const t = String(s || "").trim();
+    if (!t || t.length < 3 || t.length > 45) return true;
+    if (/areas? of expertise|what we do|save time|create value|market knowledge|thames valley|west london/i.test(t)) return true;
+    if (/^[A-Z0-9][A-Z0-9\s&!'’-]{2,}$/.test(t) && t === t.toUpperCase()) return true;
+    if (/^(home|about|contact|services|solutions|blog|news)$/i.test(t)) return true;
+    return false;
+}
+
+function pickMessagingService(lead, research) {
+    const keywords = (lead && lead.keywords) || [];
+    const services = (research && research.facts && research.facts.services) || [];
+    const fromKw = keywords.find((k) => !isBadMessagingService(k));
+    if (fromKw) return fromKw;
+    const fromSvc = services.find((s) => !isBadMessagingService(s));
+    return fromSvc || null;
+}
 
 function firstNameOf(lead) {
     if (lead.firstName) return lead.firstName;
@@ -113,8 +171,17 @@ function buildCompanyOverview(company, lead, research, analysis, strat, nf) {
 
     let sell, sellSrc;
     if (research.facts.services && research.facts.services.length) {
-        sell = research.facts.services.join(", ");
-        sellSrc = S.services || null;
+        const cleaned = research.facts.services.filter((s) => !isBadMessagingService(s));
+        if (cleaned.length) {
+            sell = cleaned.join(", ");
+            sellSrc = S.services || null;
+        } else if (lead.keywords && lead.keywords.length) {
+            sell = lead.keywords.slice(0, 5).join(", ");
+            sellSrc = LEAD_SOURCE;
+        } else {
+            sell = nf;
+            sellSrc = null;
+        }
     } else if (lead.keywords && lead.keywords.length) {
         sell = lead.keywords.slice(0, 5).join(", ");
         sellSrc = LEAD_SOURCE;
@@ -464,12 +531,120 @@ function decideStrategy(lead, research, analysis, opts = {}) {
         /* boosts are best-effort; base `score` values remain valid even if this block fails */
     }
 
+    // ---- Offer diversity / anti-spam (additive re-rank) ----
+    try {
+        const industryKey = resolveIndustryCluster(lead, research);
+        const industryBoosts = industryKey ? INDUSTRY_OFFER_BOOSTS[industryKey] : null;
+        if (industryBoosts) {
+            for (const c of candidates) {
+                const d = industryBoosts[c.id] || 0;
+                if (d) {
+                    c.score += d;
+                    ruleLog.fire("industryOfferBoost", d, `${industryKey} boost on ${c.id}`);
+                }
+            }
+        }
+
+        // Soft boost for operator-selected offerFocus (never hard-filters).
+        // If nearly every offer is selected, treat as "no preference" — otherwise
+        // everything gets +1.5 and ranking is unchanged / chatbot still wins.
+        const focus = Array.isArray(opts.offerFocus) ? opts.offerFocus.map((x) => lc(x)) : [];
+        const focusIsSelective = focus.length > 0 && focus.length <= 4;
+        if (focusIsSelective) {
+            for (const c of candidates) {
+                const hit = focus.some((f) => lc(c.id).includes(f) || lc(c.name).includes(f));
+                if (hit) {
+                    c.score += 1.5;
+                    ruleLog.fire("offerFocusBoost", 1.5, `offerFocus soft-boost on ${c.id}`);
+                }
+            }
+        } else if (focus.length > 4) {
+            ruleLog.fire("offerFocusSkipped", 0, `offerFocus lists ${focus.length} offers — treated as no preference`);
+        }
+
+        // Pain-model offer hints (e.g. real_estate no_listing_search → landing_cro)
+        const painSignals = (research.painModel && research.painModel.signals) || [];
+        for (const ps of painSignals) {
+            if (!ps || !ps.offerId) continue;
+            const c = candidates.find((x) => x.id === ps.offerId);
+            if (c) {
+                const pts = Math.min(2, (ps.weight || 4) / 4);
+                c.score += pts;
+                ruleLog.fire("painOfferBoost", pts, `${ps.code || "pain"} -> ${ps.offerId}`);
+            }
+        }
+
+        // Chat absence alone + weak intent → don't default to chatbot.
+        const intentEarly = (research.intentSignals && research.intentSignals.intentScore) || 0;
+        const onlyChatGap = gaps.chat && !gaps.cta && !gaps.booking && !gaps.design && !gaps.capture;
+        if (onlyChatGap && intentEarly < 30) {
+            const bot = candidates.find((c) => c.id === "ai_chatbot");
+            if (bot) {
+                bot.score = Math.max(0, bot.score - 2.5);
+                ruleLog.fire("chatOnlySoftPenalty", -2.5, "Live-chat absence is the only strong gap + weak intent — demote chatbot");
+            }
+            const softer = candidates.find((c) => c.id === "landing_cro") || candidates.find((c) => c.id === "followup_automation");
+            if (softer) {
+                softer.score += 1;
+                ruleLog.fire("chatOnlySofterBoost", 1, `Boosted ${softer.id} as softer first offer`);
+            }
+        }
+
+        // Real estate / property + weak intent: prefer niche CRO/follow-up over chatbot spam.
+        if ((industryKey === "real_estate" || industryKey === "property") && intentEarly < 30 && gaps.chat) {
+            const bot = candidates.find((c) => c.id === "ai_chatbot");
+            if (bot) {
+                bot.score = Math.max(0, bot.score - 2);
+                ruleLog.fire("realEstateChatbotPenalty", -2, "Real estate + weak intent — demote generic chatbot");
+            }
+            const cro = candidates.find((c) => c.id === "landing_cro");
+            if (cro) {
+                cro.score += 1.5;
+                ruleLog.fire("realEstateCroBoost", 1.5, "Real estate + weak intent — prefer landing/CRO");
+            }
+        }
+
+        // In-batch frequency penalty: prefer less-used near-ties.
+        const usage = opts.offerUsageCounts || {};
+        for (const c of candidates) {
+            const used = usage[c.id] || 0;
+            if (used > 0) {
+                const pen = Math.min(2, used * 0.75);
+                c.score -= pen;
+                ruleLog.fire("batchOfferPenalty", -pen, `${c.id} used ${used}x in batch`);
+            }
+        }
+    } catch {
+        /* diversity rules are best-effort */
+    }
+
     candidates.sort((a, b) => b.score - a.score);
+
+    // Near-tie break: if top two within 1.5, pick the less-used in this batch.
+    try {
+        const usage = opts.offerUsageCounts || {};
+        if (candidates.length >= 2) {
+            const a = candidates[0];
+            const b = candidates[1];
+            if (a && b && Math.abs((a.score || 0) - (b.score || 0)) <= 1.5) {
+                const ua = usage[a.id] || 0;
+                const ub = usage[b.id] || 0;
+                if (ub < ua) {
+                    candidates[0] = b;
+                    candidates[1] = a;
+                    ruleLog.fire("batchOfferTieBreak", 0, `Near-tie: prefer ${b.id} (used ${ub}) over ${a.id} (used ${ua})`);
+                }
+            }
+        }
+    } catch {
+        /* ignore */
+    }
+
     const best = candidates[0];
     const runnerUp = candidates.find((c) => c.id !== best.id && c.score > 0) || candidates[1];
 
     const companyShort = lead.company || "the company";
-    const topService = (research.facts.services || [])[0] || (lead.keywords || [])[0] || null;
+    const topService = pickMessagingService(lead, research);
 
     // Offer copy
     const OFFER_COPY = {
@@ -676,11 +851,22 @@ function decideStrategy(lead, research, analysis, opts = {}) {
     let priorityV2 = priority;
     if (apolloConfidenceBoost.fundingWindowBoost && confidenceModel.confidenceV2 >= 60) priorityV2 = "High";
 
-    // 3.5/3.6 — true priority = pain × intent, gated by NURTURE/DISQUALIFIED.
-    // verdictV2/priorityV2 are NEW fields — `verdict`/`priority` above are
-    // untouched so existing consumers see no change in shape or value.
-    if (priorityModel.priorityTier === "High") priorityV2 = priorityV2 === "Low" ? "Medium" : priorityV2;
-    if (priorityModel.priorityTier === "Low" && !priorityModel.intentHigh && !priorityModel.painHigh) priorityV2 = priority === "High" ? "Medium" : priority;
+    // 3.5/3.6 — true priority = pain × intent. Align BOTH displayed priority and
+    // priorityV2 so the UI never stores High while pain×intent is Low.
+    let priorityCappedByPainIntent = false;
+    if (priorityModel.priorityTier === "High") {
+        priorityV2 = priorityV2 === "Low" ? "Medium" : priorityV2;
+    }
+    if (priorityModel.priorityTier === "Low" && !priorityModel.intentHigh && !priorityModel.painHigh) {
+        if (priority === "High" || priorityV2 === "High") {
+            priorityCappedByPainIntent = true;
+            ruleLog.fire("priority.painIntentCap", 0, "Priority capped at Medium — pain×intent Low (do not treat as High)");
+        }
+        if (priority === "High") priority = "Medium";
+        if (priorityV2 === "High") priorityV2 = "Medium";
+        else if (priority === "Low") priorityV2 = "Low";
+        else priorityV2 = priorityV2 === "Low" ? "Low" : "Medium";
+    }
 
     let verdictV2 = verdict;
     const disqualification = research.disqualification || { disqualified: false, reasons: [] };
@@ -690,12 +876,21 @@ function decideStrategy(lead, research, analysis, opts = {}) {
     } else if (nurture) {
         verdictV2 = "NURTURE";
     } else {
-        const urgencySignals = research.urgencySignals || [];
-        if (urgencySignals.some((u) => u.urgency === "very-high")) {
-            verdictV2 = "YES";
-            priorityV2 = "High";
-            confidenceModel.confidenceV2 = clamp(confidenceModel.confidenceV2 + 15, 0, 95);
-            ruleLog.fire("urgency.veryHigh", 15, "Very-high urgency signal detected — verdict forced to YES/High");
+        // Chat-only gap + weak intent → prefer NURTURE over CONTACT with chatbot.
+        const onlyChat = gaps.chat && !gaps.cta && !gaps.booking && !gaps.design;
+        if (onlyChat && intentScore < 25 && best && best.id === "ai_chatbot") {
+            nurture = true;
+            verdictV2 = "NURTURE";
+            priorityV2 = priorityV2 === "High" ? "Medium" : priorityV2;
+            ruleLog.fire("chatOnlyNurture", 0, "Only live-chat gap + weak intent → NURTURE (avoid chatbot spam)");
+        } else {
+            const urgencySignals = research.urgencySignals || [];
+            if (urgencySignals.some((u) => u.urgency === "very-high")) {
+                verdictV2 = "YES";
+                priorityV2 = "High";
+                confidenceModel.confidenceV2 = clamp(confidenceModel.confidenceV2 + 15, 0, 95);
+                ruleLog.fire("urgency.veryHigh", 15, "Very-high urgency signal detected — verdict forced to YES/High");
+            }
         }
     }
 
@@ -742,6 +937,7 @@ function decideStrategy(lead, research, analysis, opts = {}) {
         trustGeoSignals: research.trustGeoSignals || {},
         priorityV2,
         verdictV2,
+        priorityCappedByPainIntent,
         ruleLog: ruleLog.all ? ruleLog.all() : [],
     };
 }
@@ -765,29 +961,38 @@ function generateMessages(lead, research, analysis, strat) {
         ? "the site doesn't push visitors toward one clear next step"
         : strat.gaps.booking
         ? "clients can't book themselves in online"
-        : "there's a quick win to convert more of your existing traffic";
+        : "there's a clear, fixable gap on the site";
 
-    const whatsapp = `Hi ${first} — came across ${company}${service ? ` and your work on ${service}` : ""}. Quick observation: ${observation}. I put together a short, no-strings idea to fix that and ${outcome}. Want me to send it over?`;
+    let host = company;
+    try {
+        if (research.website) host = new URL(research.website).host.replace(/^www\./, "");
+    } catch {
+        /* keep company */
+    }
 
-    const coldEmail = {
-        subjectLines: [
-            `Quick note on ${research.website ? new URL(research.website).host.replace(/^www\./, "") : company}`,
-            `${company} — a small fix worth more leads`,
-            `${first}, a 2-minute observation on your site`,
-            `Turning your traffic into booked conversations`,
-        ],
-        body: `Hi ${first},\n\nI was looking at ${company}${service ? ` and your ${service} offering` : ""} and one thing stood out: ${observation}.\n\nFor a team your size that usually means real enquiries slip through. I put together a short, specific idea to ${outcome} — no pitch attached, it's useful either way.\n\nWorth me sending it over?\n\nBest,\n[Your Name]`,
-        note: "Lead with the specific observation, not a service list. Sell the outcome (more booked conversations), never the technology.",
-    };
+    // Deliverability-safe cold email (plain text, soft ask, no links/hype).
+    const coldEmail = DeliverabilityL.buildSafeColdEmail
+        ? DeliverabilityL.buildSafeColdEmail({ first, company, service, observation, host })
+        : {
+            subjectLines: [`Quick note on ${host}`],
+            body: `Hi ${first},\n\nI was looking at ${company} and one thing stood out: ${observation}.\n\nI wrote a short note with one specific idea that might help. Happy to send it if useful.\n\nWant me to share it?\n\nBest,\n[Your Name]`,
+            note: "Lead with a specific observation; soft ask; no links.",
+        };
 
-    const linkedin = `Hi ${first} — genuinely liked what ${company} is doing${service ? ` around ${service}` : ""}. I help teams like yours ${outcome}, and I spotted one clear, fixable gap on your site. Happy to share a short breakdown — no pitch. Open to connecting?`;
+    const whatsapp = `Hi ${first} — came across ${company}${service ? ` and your work on ${service}` : ""}. Quick observation: ${observation}. I put together a short idea that might help. Want me to send it over?`;
 
-    const callOpener = `Hi ${first}, this is [Your Name] — I'll be quick. I looked at ${company}'s site and noticed ${observation}. I've got a specific, no-cost idea to fix it and ${outcome}. Is now a bad time for two minutes?`;
+    const linkedin = `Hi ${first} — liked what ${company} is doing${service ? ` around ${service}` : ""}. I spotted one clear, fixable gap on your site and wrote a short note — happy to share if useful. Open to connecting?`;
+
+    const callOpener = `Hi ${first}, this is [Your Name] — I'll be quick. I looked at ${company}'s site and noticed ${observation}. I have one specific idea written down. Is now a bad time for two minutes?`;
 
     // Icebreakers — each must reference a real observation; skip if unknown
     const ice = [];
     if (strat.gaps.chat) ice.push(`Noticed ${company}'s site has no live chat — visitors have to email and wait for a reply.`);
-    if (service) ice.push(`Saw that you focus on ${service}${(research.facts.services || [])[1] ? ` and ${research.facts.services[1]}` : ""} — clear positioning.`);
+    if (service) {
+        const second = ((research.facts.services || []).find((s) => s !== service && !isBadMessagingService(s))
+            || (lead.keywords || []).find((k) => k !== service && !isBadMessagingService(k)));
+        ice.push(`Saw that you focus on ${service}${second ? ` and ${second}` : ""} — clear positioning.`);
+    }
     if (lead.city || lead.industry) ice.push(`Running ${lead.industry ? lead.industry.toLowerCase() : "a business"}${lead.city ? ` out of ${lead.city}` : ""} — I follow that space closely.`);
     if (research.tech.stack && research.tech.stack.length) ice.push(`Noticed your site runs on ${research.tech.stack[0]} — solid choice, and easy to build capture on top of.`);
     if (research.facts.description) ice.push(`Your site line "${research.facts.description.slice(0, 80)}${research.facts.description.length > 80 ? "…" : ""}" makes the value clear.`);
@@ -1139,6 +1344,7 @@ function buildProspectData(lead, research, analysis, strat, messages) {
         executiveWhyNow: messages.executiveWhyNow || null,
         verdictV2: strat.verdictV2,
         priorityV2: strat.priorityV2,
+        priorityCappedByPainIntent: !!strat.priorityCappedByPainIntent,
         auditLog: strat.ruleLog || [],
     };
 
@@ -1194,8 +1400,9 @@ function reconcileReportForDisplay(data) {
             }
         }
 
-        // FIX 2 — reconcile, don't hide, priority disagreements between the
-        // initial scan, the pain×intent priorityModel, and priorityV2.
+        // FIX 2 — priority disagreements. Routine pain×intent High→Medium caps are
+        // already applied in decideStrategy; don't scare operators with a "Signal
+        // conflict" banner for that resolved case. Only flag remaining far conflicts.
         let verdictConflict = false;
         try {
             const rank = { High: 3, Medium: 2, Low: 1 };
@@ -1203,17 +1410,21 @@ function reconcileReportForDisplay(data) {
             const tierPriority = data.priorityModel && data.priorityModel.priorityTier;
             const v2Priority = data.priorityV2;
             const seen = [initialPriority, tierPriority, v2Priority].filter((p) => rank[p]);
-            if (new Set(seen).size > 1) {
+            const unique = new Set(seen);
+            const far =
+                initialPriority &&
+                tierPriority &&
+                Math.abs((rank[initialPriority] || 2) - (rank[tierPriority] || 2)) > 1;
+            const routinePainCap =
+                !!data.priorityCappedByPainIntent ||
+                (tierPriority === "Low" &&
+                    (initialPriority === "Medium" || v2Priority === "Medium") &&
+                    !(data.priorityModel && data.priorityModel.painHigh) &&
+                    !(data.priorityModel && data.priorityModel.intentHigh));
+
+            if (unique.size > 1 && far && !routinePainCap) {
                 verdictConflict = true;
-                const reasonBits = [];
-                if (tierPriority && rank[tierPriority] < rank[initialPriority]) {
-                    reasonBits.push(`pain×intent model scores this ${tierPriority} (priority score ${data.priorityModel.priorityScore ?? "n/a"})`);
-                }
-                if (data.disqualification && data.disqualification.disqualified) reasonBits.push("disqualification signals present");
-                if (data.nurture) reasonBits.push("NURTURE (high ICP-fit, low intent) gate fired");
-                const reasonText = reasonBits.length ? reasonBits.join("; ") : "downstream signal models disagree with the initial scan";
-                const initialLabel = initialPriority ? `${initialPriority} priority` : "an unclear priority";
-                const note = `Signal conflict: initial scan suggests ${initialLabel}, but ${reasonText}. Recommend manual review before treating as ${initialPriority === "High" ? "high priority" : initialLabel.toLowerCase()}.`;
+                const note = `Priority models still disagree (${[initialPriority, tierPriority, v2Priority].filter(Boolean).join(" vs ")}). Manual review before treating as High.`;
                 data.priorityReconciliation = {
                     conflict: true,
                     initialPriority: initialPriority || null,
@@ -1222,8 +1433,17 @@ function reconcileReportForDisplay(data) {
                     note,
                 };
                 if (data.executiveSummary && Array.isArray(data.executiveSummary.keyFacts)) {
-                    data.executiveSummary.keyFacts = data.executiveSummary.keyFacts.concat([["Signal conflict", note]]);
+                    data.executiveSummary.keyFacts = data.executiveSummary.keyFacts.concat([["Priority note", note]]);
                 }
+            } else if (routinePainCap) {
+                data.priorityReconciliation = {
+                    conflict: false,
+                    capped: true,
+                    initialPriority: initialPriority || null,
+                    priorityModelTier: tierPriority || null,
+                    priorityV2: v2Priority || null,
+                    note: "Priority held at Medium — pain×intent is Low. Not a conflict; do not escalate to High without new evidence.",
+                };
             }
         } catch {
             verdictConflict = false;
@@ -1275,10 +1495,22 @@ function reconcileReportForDisplay(data) {
             data.dataQualityBanner = null;
         }
 
+        // ACTION SYSTEM — always attach canonical actionCard last.
+        if (ActionCardL.attachActionCard) {
+            ActionCardL.attachActionCard(data, null, data.messages);
+        }
+
         return data;
     } catch {
         return data;
     }
 }
 
-module.exports = { analyzeWebsite, decideStrategy, generateMessages, buildProspectData, classifyBusiness };
+module.exports = {
+    analyzeWebsite,
+    decideStrategy,
+    generateMessages,
+    buildProspectData,
+    classifyBusiness,
+    buildUnreachableSkipData: ActionCardL.buildUnreachableSkipData,
+};

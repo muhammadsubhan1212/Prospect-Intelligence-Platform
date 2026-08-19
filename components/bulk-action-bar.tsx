@@ -6,9 +6,7 @@ import { Button } from "@/components/ui/primitives";
 
 /**
  * Sticky action bar shown whenever one or more reports are selected via
- * checkbox. Handles the bulk-download-as-zip and bulk-delete API calls
- * itself; the parent list just needs to pass the selected ids and refresh
- * on `onDeleted`.
+ * checkbox. Handles Instantly CSV export, bulk DOCX zip, and bulk-delete.
  */
 export function BulkActionBar({
   selectedIds,
@@ -19,9 +17,38 @@ export function BulkActionBar({
   onClear: () => void;
   onDeleted: () => void;
 }) {
-  const [busy, setBusy] = useState<"delete" | "download" | null>(null);
+  const [busy, setBusy] = useState<"delete" | "download" | "sequencer" | "allCsv" | null>(null);
 
   if (selectedIds.length === 0) return null;
+
+  async function downloadSequencer(decisions: Array<"CONTACT" | "NURTURE" | "SKIP">, includeSkip = false) {
+    setBusy(includeSkip ? "allCsv" : "sequencer");
+    try {
+      const res = await fetch("/api/reports/export/sequencer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reportIds: selectedIds, decisions, includeSkip }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({ error: "Export failed." }));
+        alert(json.error || "Export failed.");
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `sequencer_${decisions.join("_")}_${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      alert("Export failed.");
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function onBulkDownload() {
     setBusy("download");
@@ -96,9 +123,26 @@ export function BulkActionBar({
         </button>
       </div>
       <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          disabled={busy !== null}
+          onClick={() => void downloadSequencer(["CONTACT"])}
+        >
+          {busy === "sequencer" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          Download Instantly CSV
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy !== null}
+          onClick={() => void downloadSequencer(["CONTACT", "NURTURE", "SKIP"], true)}
+        >
+          {busy === "allCsv" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+          Export all decisions
+        </Button>
         <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void onBulkDownload()}>
           {busy === "download" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-          Download ZIP
+          DOCX ZIP (optional)
         </Button>
         <Button size="sm" variant="danger" disabled={busy !== null} onClick={() => void onBulkDelete()}>
           {busy === "delete" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}

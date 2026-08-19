@@ -187,16 +187,26 @@ const REGION_TIMEZONES = [
 function parseCityStateFromAddress(address) {
     try {
         if (!address || typeof address !== "string") return { city: "", state: "" };
-        const COUNTRY_RE = /^(united states( of america)?|usa|u\.s\.a\.?|uk|united kingdom|canada|australia|ireland)$/i;
-        const ZIP_RE = /^\d{4,10}(-\d{3,4})?$/;
+        const COUNTRY_RE = /^(united states( of america)?|usa|u\.s\.a\.?|uk|united kingdom|canada|australia|ireland|england|scotland|wales)$/i;
+        const ZIP_RE = /^\d{4,10}(-\d{3,4})?$|^[A-Z]{1,2}\d[A-Z\d]?\s*\d?[A-Z]{0,2}$/i;
+        const looksLikeProse = (p) =>
+            p.length > 40 ||
+            /\.\s+[A-Z]/.test(p) ||
+            /\b(his|her|their|strong|skill|negotiation|leveraging|offering)\b/i.test(p) ||
+            /^\d+\s+\w+/.test(p); // street lines, not city names
         const parts = address
             .split(",")
             .map((p) => p.trim())
             .filter(Boolean)
-            .filter((p) => !COUNTRY_RE.test(p) && !/^(us|u\.s\.?)$/i.test(p) && !ZIP_RE.test(p));
+            .filter((p) => !COUNTRY_RE.test(p) && !/^(us|u\.s\.?)$/i.test(p) && !ZIP_RE.test(p))
+            .filter((p) => !looksLikeProse(p));
         if (!parts.length) return { city: "", state: "" };
         const state = parts.length >= 2 ? parts[parts.length - 1] : "";
         const city = parts.length >= 2 ? parts[parts.length - 2] : parts[parts.length - 1];
+        // Reject if city still looks like a street address fragment
+        if (/^\d/.test(city) || /(?:Road|Rd|Street|St|Avenue|Ave)\b/i.test(city)) {
+            return { city: "", state: "" };
+        }
         return { city: city || "", state: state || "" };
     } catch {
         return { city: "", state: "" };

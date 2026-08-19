@@ -21,6 +21,7 @@ export async function POST(req: Request) {
     let options: GenerateOptions = { saveJson: true, timeout: 12000 };
     let csvPath: string | undefined;
     let filename = "upload.csv";
+    let replaceExisting = false;
 
     if (contentType.includes("multipart/form-data")) {
       const form = await req.formData();
@@ -34,6 +35,9 @@ export async function POST(req: Request) {
         }
       }
       uploadId = String(form.get("uploadId") || "") || undefined;
+      replaceExisting =
+        String(form.get("replaceExisting") || "") === "1" ||
+        String(form.get("replaceExisting") || "").toLowerCase() === "true";
 
       if (file && file instanceof File) {
         const saved = await saveUploadedCsv(file);
@@ -49,7 +53,11 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: "file or uploadId required" }, { status: 400 });
       }
     } else {
-      const body = (await req.json()) as { uploadId: string; options?: GenerateOptions };
+      const body = (await req.json()) as {
+        uploadId: string;
+        options?: GenerateOptions;
+        replaceExisting?: boolean;
+      };
       if (!body.uploadId) {
         return NextResponse.json({ error: "uploadId required" }, { status: 400 });
       }
@@ -58,13 +66,15 @@ export async function POST(req: Request) {
       const resolved = await resolveUploadCsvPath(uploadId);
       csvPath = resolved.csvPath;
       filename = resolved.upload.filename;
+      replaceExisting = !!body.replaceExisting;
     }
 
-    const { batch } = await createBatchJob({
+    const { batch, replacedIds } = await createBatchJob({
       csvUploadId: uploadId!,
       filename,
       csvPath: csvPath!,
       options,
+      replaceExisting,
     });
 
     // Always process in this same request — no background queue.
@@ -86,6 +96,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       batch: done,
       reports,
+      replacedIds,
       inline: true,
       blobStorage: blobEnabled(),
     });

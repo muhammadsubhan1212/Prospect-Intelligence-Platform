@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { Card, Progress, Button } from "@/components/ui/primitives";
+import { Download } from "lucide-react";
+import { Badge, Card, Progress, Button } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/status-badge";
 
 type Report = {
@@ -15,6 +16,12 @@ type Report = {
   message: string;
   progress: number;
   error?: string;
+  decision?: string;
+  priority?: string;
+  firstOffer?: string;
+  emailSubject?: string;
+  confidence?: number;
+  reviewFlag?: boolean;
 };
 
 type Batch = {
@@ -111,19 +118,46 @@ export default function ProcessingPage() {
         : "Working…");
 
   const stuck = batch?.status === "queued" || reports.some((r) => r.status === "queued");
+  const done = reports.filter((r) => r.status === "completed");
+  const contact = done.filter((r) => r.decision === "CONTACT").length;
+  const nurture = done.filter((r) => r.decision === "NURTURE").length;
+  const skip = done.filter((r) => r.decision === "SKIP").length;
+  const review = done.filter((r) => r.reviewFlag).length;
+  const batchDone = batch?.status === "completed" || batch?.status === "failed";
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div className="mx-auto max-w-5xl space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Processing</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {batchDone ? "Batch results" : "Processing"}
+          </h1>
           <p className="text-sm text-muted-foreground">
             Batch {params.id.slice(0, 8)}… · {batch?.filename || "CSV"}
           </p>
         </div>
-        <Button variant="outline" disabled={removing || reports.length === 0} onClick={() => void removeAll()}>
-          {removing ? "Removing…" : "Remove from queue"}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {batchDone ? (
+            <>
+              {contact > 0 ? (
+                <Link href={`/reports/sending/${params.id}`}>
+                  <Button>
+                    Open Send Queue ({contact} CONTACT)
+                  </Button>
+                </Link>
+              ) : null}
+              <a href={`/api/reports/export/sequencer?batchId=${params.id}&decision=CONTACT`}>
+                <Button variant="outline">
+                  <Download className="h-4 w-4" />
+                  Download Instantly CSV
+                </Button>
+              </a>
+            </>
+          ) : null}
+          <Button variant="outline" disabled={removing || reports.length === 0} onClick={() => void removeAll()}>
+            {removing ? "Removing…" : "Remove from queue"}
+          </Button>
+        </div>
       </div>
 
       {stuck ? (
@@ -140,62 +174,89 @@ export default function ProcessingPage() {
         </div>
         <Progress value={overall} />
         <div className="grid grid-cols-2 gap-3 text-sm text-muted-foreground sm:grid-cols-4">
-          <div>Total: {batch?.total ?? "—"}</div>
-          <div>Done: {batch?.completed ?? 0}</div>
-          <div>Failed: {batch?.failed ?? 0}</div>
-          <div>Queued: {batch?.queued ?? 0}</div>
+          <div>
+            CONTACT: <span className="font-medium text-success">{contact}</span>
+          </div>
+          <div>
+            NURTURE: <span className="font-medium text-warning">{nurture}</span>
+          </div>
+          <div>
+            SKIP: <span className="font-medium text-danger">{skip}</span>
+          </div>
+          <div>
+            Needs review: <span className="font-medium">{review}</span>
+          </div>
         </div>
       </Card>
 
       <Card className="overflow-hidden">
-        <div className="border-b border-border px-5 py-3 font-medium">Reports in this batch</div>
-        <div className="divide-y divide-border">
-          {reports.map((r) => (
-            <div key={r.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
-              <div>
-                <div className="font-medium">{r.company}</div>
-                <div className="text-xs text-muted-foreground">
-                  {r.fullName} · {r.message}
-                </div>
-                {r.error ? <div className="mt-1 text-xs text-danger">{r.error}</div> : null}
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="w-24">
-                  <Progress value={r.progress} />
-                </div>
-                <StatusBadge status={r.status} />
-                {r.status === "completed" ? (
-                  <Link href={`/reports/${r.id}`} className="text-sm text-accent hover:underline">
-                    Open
-                  </Link>
-                ) : null}
-                <button
-                  type="button"
-                  className="text-sm text-danger hover:underline"
-                  disabled={removing}
-                  onClick={async () => {
-                    if (!confirm(`Remove ${r.company}?`)) return;
-                    setRemoving(true);
-                    try {
-                      await fetch(`/api/reports/${r.id}`, { method: "DELETE" });
-                      setReports((prev) => prev.filter((x) => x.id !== r.id));
-                    } finally {
-                      setRemoving(false);
-                    }
-                  }}
-                >
-                  Remove
-                </button>
-              </div>
-            </div>
-          ))}
+        <div className="border-b border-border px-5 py-3 font-medium">Action list</div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-muted/60 text-left text-muted-foreground">
+              <tr>
+                <th className="px-4 py-3 font-medium">Company</th>
+                <th className="px-4 py-3 font-medium">Contact</th>
+                <th className="px-4 py-3 font-medium">Decision</th>
+                <th className="px-4 py-3 font-medium">Priority</th>
+                <th className="px-4 py-3 font-medium">Offer</th>
+                <th className="px-4 py-3 font-medium">Subject</th>
+                <th className="px-4 py-3 font-medium">Conf.</th>
+                <th className="px-4 py-3 font-medium">Review?</th>
+                <th className="px-4 py-3 font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              {reports.map((r) => (
+                <tr key={r.id} className="border-t border-border">
+                  <td className="px-4 py-3 font-medium">{r.company}</td>
+                  <td className="px-4 py-3 text-muted-foreground">{r.fullName || "—"}</td>
+                  <td className="px-4 py-3">
+                    {r.decision ? (
+                      <Badge
+                        tone={r.decision === "CONTACT" ? "success" : r.decision === "SKIP" ? "danger" : "warning"}
+                      >
+                        {r.decision}
+                      </Badge>
+                    ) : (
+                      <StatusBadge status={r.status} />
+                    )}
+                  </td>
+                  <td className="px-4 py-3">{r.priority || "—"}</td>
+                  <td className="max-w-[140px] truncate px-4 py-3 text-muted-foreground">{r.firstOffer || "—"}</td>
+                  <td className="max-w-[160px] truncate px-4 py-3 text-muted-foreground">{r.emailSubject || "—"}</td>
+                  <td className="px-4 py-3">{r.confidence != null ? `${r.confidence}%` : "—"}</td>
+                  <td className="px-4 py-3">{r.reviewFlag ? <Badge tone="warning">Yes</Badge> : "—"}</td>
+                  <td className="px-4 py-3">
+                    {r.status === "completed" ? (
+                      <Link href={`/reports/${r.id}`} className="text-accent hover:underline">
+                        Action
+                      </Link>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">{r.message}</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </Card>
 
-      {batch?.status === "completed" ? (
-        <Link href="/reports">
-          <Button>Back to reports</Button>
-        </Link>
+      {batchDone ? (
+        <div className="flex flex-wrap gap-2">
+          {contact > 0 ? (
+            <Link href={`/reports/sending/${params.id}`}>
+              <Button>Continue to Send Queue</Button>
+            </Link>
+          ) : null}
+          <Link href="/reports">
+            <Button variant="outline">All lists</Button>
+          </Link>
+          <a href={`/api/reports/export/sequencer?batchId=${params.id}&includeSkip=true`}>
+            <Button variant="outline">Export all decisions CSV</Button>
+          </a>
+        </div>
       ) : null}
     </div>
   );

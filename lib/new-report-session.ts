@@ -1,5 +1,9 @@
+import { GTM, gtmIcpFormDefaults } from "@/lib/gtm-defaults";
+
 /** Client session key for the New Report workspace (survives navigation in this tab). */
 export const NEW_REPORT_SESSION_KEY = "prospect_new_report_session_v1";
+/** Last-used ICP persists across tabs/sessions so operators don't retype every run. */
+export const ICP_LOCAL_KEY = "prospect_icp_last_used_v2";
 
 export const LARGE_CSV_ROW_THRESHOLD = 1000;
 /** Files at/above this size are treated as potentially large even before row count. */
@@ -9,6 +13,34 @@ export const LARGE_CSV_SIZE_BYTES = 512 * 1024;
  * Stay under this before multipart overhead so uploads don't get a naked 413.
  */
 export const VERCEL_SAFE_UPLOAD_BYTES = 4 * 1024 * 1024;
+
+/** Niche offer catalog (edit in lib/gtm-defaults.ts). */
+export const OFFER_FOCUS_OPTIONS = GTM.primaryOffers;
+export const MAX_OFFER_FOCUS = GTM.maxOfferFocus;
+
+export type IcpFormState = {
+  targetIndustries: string;
+  minEmployees: string;
+  maxEmployees: string;
+  geographies: string;
+  techMustHave: string;
+  techMustNotHave: string;
+  offerFocus: string[];
+};
+
+/** Blank ICP — rare; prefer DEFAULT_ICP for first load. */
+export const EMPTY_ICP: IcpFormState = {
+  targetIndustries: "",
+  minEmployees: "",
+  maxEmployees: "",
+  geographies: "",
+  techMustHave: "",
+  techMustNotHave: "",
+  offerFocus: [],
+};
+
+/** Prefill from GTM niche defaults. */
+export const DEFAULT_ICP: IcpFormState = gtmIcpFormDefaults();
 
 export type NewReportSession = {
   uploadId: string;
@@ -27,7 +59,61 @@ export type NewReportSession = {
   company: string;
   timeoutMs: string;
   savedAt: string;
+  icp?: IcpFormState;
 };
+
+function splitList(raw: string): string[] {
+  return raw
+    .split(/[,;\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+export function icpFormToOptions(icp: IcpFormState): {
+  icpProfile: {
+    targetIndustries: string[];
+    minEmployees: number;
+    maxEmployees: number;
+    geographies: string[];
+    techMustHave: string[];
+    techMustNotHave: string[];
+  };
+  offerFocus: string[];
+} {
+  const min = parseInt(icp.minEmployees, 10);
+  const max = parseInt(icp.maxEmployees, 10);
+  return {
+    icpProfile: {
+      targetIndustries: splitList(icp.targetIndustries),
+      minEmployees: Number.isFinite(min) ? min : 0,
+      maxEmployees: Number.isFinite(max) ? max : 5000,
+      geographies: splitList(icp.geographies),
+      techMustHave: splitList(icp.techMustHave),
+      techMustNotHave: splitList(icp.techMustNotHave),
+    },
+    offerFocus: [...(icp.offerFocus || [])].slice(0, MAX_OFFER_FOCUS),
+  };
+}
+
+export function loadIcpLocal(): IcpFormState | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(ICP_LOCAL_KEY);
+    if (!raw) return null;
+    return { ...DEFAULT_ICP, ...(JSON.parse(raw) as IcpFormState) };
+  } catch {
+    return null;
+  }
+}
+
+export function saveIcpLocal(icp: IcpFormState) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(ICP_LOCAL_KEY, JSON.stringify(icp));
+  } catch {
+    /* ignore quota */
+  }
+}
 
 export function loadNewReportSession(): NewReportSession | null {
   if (typeof window === "undefined") return null;

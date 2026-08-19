@@ -49,5 +49,10 @@ next-env.d.ts
 /storage/jobs/*
 /storage/batches/*
 /storage/index.json
+/storage/ops/**
+!/storage/ops/.gitkeep
 !/storage/**/.gitkeep
+
+# engine CLI dumps
+/server/engine/output/
 

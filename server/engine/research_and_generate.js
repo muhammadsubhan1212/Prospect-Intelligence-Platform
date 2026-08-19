@@ -98,12 +98,14 @@ async function main() {
 
     const outputs = [];
     const reportsByDomain = new Map();
+    const offerUsageCounts = {};
     for (const lead of leads) {
         try {
             console.log(`\n► Researching: ${lead.fullName || "(no name)"} @ ${lead.company || "(no company)"}`);
             if (lead.website) console.log(`  website: ${lead.website}`);
             const result = await processLead(lead, {
                 ...opts,
+                offerUsageCounts,
                 onProgress: (stage, message) => {
                     if (stage === "researching" || stage === "analyzing" || stage === "generating" || stage === "completed") {
                         console.log(`  ${message}`);
@@ -111,6 +113,9 @@ async function main() {
                 },
             });
             console.log(`  report: ${result.outPath}`);
+            if (result.data && result.data.actionCard) {
+                console.log(`  action: ${result.data.actionCard.decision} · ${result.data.actionCard.priority} · ${result.data.actionCard.firstOffer}`);
+            }
             outputs.push(result.outPath);
             if (lead._companyGroup && lead._companyGroup.domain) {
                 const domain = lead._companyGroup.domain;

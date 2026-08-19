@@ -196,11 +196,11 @@ function getRoleFraming(role, fallbackFocus) {
 function generateSubjectLineVariants({ company, gapPhrase, timingSignal, techInsight }) {
     const variants = [];
     try {
-        if (gapPhrase) variants.push({ text: `${company} — a small fix worth more leads`, evidenceType: "pain-based" });
-        if (timingSignal) variants.push({ text: `Timing on ${company} — ${timingSignal}`, evidenceType: "timing-based" });
-        if (techInsight) variants.push({ text: `Noticed ${company} runs ${techInsight} — quick idea`, evidenceType: "tech-based" });
+        if (gapPhrase) variants.push({ text: `${company} — one observation`, evidenceType: "pain-based" });
+        if (timingSignal) variants.push({ text: `Quick thought on ${company}`, evidenceType: "timing-based" });
+        if (techInsight) variants.push({ text: `Noticed ${company} runs ${techInsight}`, evidenceType: "tech-based" });
         if (!variants.length) variants.push({ text: `Quick note on ${company}`, evidenceType: "pain-based" });
-        while (variants.length < 2) variants.push({ text: `${company}, a 2-minute observation`, evidenceType: "pain-based" });
+        while (variants.length < 2) variants.push({ text: `${company}, a quick thought`, evidenceType: "pain-based" });
     } catch {
         return [{ text: "Quick note", evidenceType: "pain-based" }];
     }

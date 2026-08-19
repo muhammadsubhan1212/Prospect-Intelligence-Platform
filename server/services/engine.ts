@@ -24,6 +24,38 @@ export type Lead = {
   [key: string]: unknown;
 };
 
+export type ActionDecision = "CONTACT" | "NURTURE" | "SKIP";
+export type ActionPriority = "High" | "Medium" | "Low";
+
+export type ActionCard = {
+  decision: ActionDecision;
+  priority: ActionPriority;
+  confidence: number;
+  whyNow: string;
+  firstOffer: string;
+  offerWhy: string;
+  channel: "Email" | "LinkedIn" | "Phone" | "WhatsApp";
+  email: {
+    to: string;
+    firstName: string;
+    company: string;
+    subject: string;
+    body: string;
+  };
+  skipReason?: string;
+  reviewFlag?: boolean;
+  reviewNote?: string;
+};
+
+export type OutreachOutcome = {
+  status: "not_sent" | "sent" | "replied" | "meeting" | "not_interested" | "bounced";
+  updatedAt: string;
+  note?: string;
+};
+
+/** Browser Send Queue status (Gmail compose + confirm — not silent mass-send). */
+export type SendQueueStatus = "pending" | "opened_gmail" | "sent" | "skipped" | "failed";
+
 export type ProspectData = {
   lead?: Lead;
   executiveSummary?: {
@@ -64,7 +96,19 @@ export type ProspectData = {
   pipelineBucket?: "STANDARD" | "NURTURE" | "DISQUALIFIED";
   verdictV2?: string;
   priorityV2?: string;
+  /** Canonical outreach action — present on all newly generated reports. */
+  actionCard?: ActionCard;
+  outreachOutcome?: OutreachOutcome;
   [key: string]: unknown;
+};
+
+export type IcpProfile = {
+  targetIndustries?: string[];
+  minEmployees?: number;
+  maxEmployees?: number;
+  geographies?: string[];
+  techMustHave?: string[];
+  techMustNotHave?: string[];
 };
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -84,14 +128,16 @@ const bridge = require("./engine-bridge.cjs") as {
       outDir?: string;
       jsonDir?: string;
       saveJson?: boolean;
-      icpProfile?: Record<string, unknown>;
+      icpProfile?: IcpProfile | Record<string, unknown>;
+      offerFocus?: string[];
+      offerUsageCounts?: Record<string, number>;
       onProgress?: (stage: string, message: string, extra?: Record<string, unknown>) => void;
     }
   ) => Promise<{
     outPath: string;
     data: ProspectData;
     analysis: { overallScore: number };
-    strat: { best: { name: string }; priority: string; confidence: number };
+    strat: { best: { name: string; id?: string }; priority: string; confidence: number };
     research: unknown;
   }>;
   // PHASE 3.7 — lead-to-lead deduplication (additive, optional to callers).
