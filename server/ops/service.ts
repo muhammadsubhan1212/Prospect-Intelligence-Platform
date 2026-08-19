@@ -140,68 +140,113 @@ async function logActivity(partial: Omit<Activity, "id" | "timestamp"> & { times
   await saveActivities(file);
 }
 
-export async function importMasterCsv(file: { name: string; arrayBuffer: () => Promise<ArrayBuffer> }) {
-  return withOpsLock(async () => {
-    const importId = newImportId();
-    const buf = Buffer.from(await file.arrayBuffer());
-    const safe = file.name.replace(/[^a-zA-Z0-9._-]+/g, "_");
-    const rel = `ops/imports/${importId}_${safe}`;
-    await durableWriteFile(rel, buf, "text/csv; charset=utf-8");
-    const csvPath = await durableEnsureLocal(rel);
-    if (!csvPath) throw new Error("Could not store CSV");
+function ingestRecords(
+  records: Record<string, string>[],
+  headers: string[],
+  source: string,
+  importId: string,
+  leadsFile: { leads: MasterLead[] }
+) {
+  const idx = buildIdx(leadsFile.leads);
+  let newLeads = 0;
+  let alreadyExisting = 0;
+  let invalidRows = 0;
+  const duplicateSamples: { row: number; email?: string; company?: string; matchedId: string }[] = [];
 
-    const parsed = engine.readCSVObjects(csvPath);
-    const headers = parsed.headers;
-    const records = parsed.records;
+  for (let i = 0; i < records.length; i++) {
+    const mapped = engine.mapRecordToLead(records[i], headers);
+    const draft = fromEngineLead(mapped, source, importId);
+    if (!draft) {
+      invalidRows += 1;
+      continue;
+    }
+    const existing = findDup(draft, idx);
+    if (existing) {
+      alreadyExisting += 1;
+      if (duplicateSamples.length < 40) {
+        duplicateSamples.push({ row: i + 1, email: draft.email, company: draft.company, matchedId: existing.id });
+      }
+      continue;
+    }
+    leadsFile.leads.push(draft);
+    addToIdx(draft, idx);
+    newLeads += 1;
+  }
+  return { newLeads, alreadyExisting, invalidRows, duplicateSamples };
+}
+
+export async function importMasterCsv(file: { name: string; arrayBuffer: () => Promise<ArrayBuffer> }) {
+  const buf = Buffer.from(await file.arrayBuffer());
+  const importId = newImportId();
+  const safe = file.name.replace(/[^a-zA-Z0-9._-]+/g, "_");
+  const rel = `ops/imports/${importId}_${safe}`;
+  await durableWriteFile(rel, buf, "text/csv; charset=utf-8");
+  const csvPath = await durableEnsureLocal(rel);
+  if (!csvPath) throw new Error("Could not store CSV");
+  const parsed = engine.readCSVObjects(csvPath);
+  return importMasterRecords({
+    filename: file.name,
+    headers: parsed.headers,
+    records: parsed.records,
+    importId,
+    storedPath: rel,
+  });
+}
+
+/** Chunk-safe import used on Vercel (each part stays under the function payload limit). */
+export async function importMasterRecords(input: {
+  filename: string;
+  headers: string[];
+  records: Record<string, string>[];
+  importId?: string;
+  storedPath?: string;
+  partLabel?: string;
+}) {
+  return withOpsLock(async () => {
+    const headers = input.headers || [];
+    const records = input.records || [];
     if (!headers.length) {
       throw new Error("Could not read CSV headers. Save the file as CSV (not Excel) and try again.");
     }
-    const leadsFile = await loadLeads();
-    const idx = buildIdx(leadsFile.leads);
-    let newLeads = 0;
-    let alreadyExisting = 0;
-    let invalidRows = 0;
-    const duplicateSamples: { row: number; email?: string; company?: string; matchedId: string }[] = [];
-
-    for (let i = 0; i < records.length; i++) {
-      const mapped = engine.mapRecordToLead(records[i], headers);
-      const draft = fromEngineLead(mapped, file.name, importId);
-      if (!draft) {
-        invalidRows += 1;
-        continue;
-      }
-      const existing = findDup(draft, idx);
-      if (existing) {
-        alreadyExisting += 1;
-        if (duplicateSamples.length < 40) {
-          duplicateSamples.push({ row: i + 1, email: draft.email, company: draft.company, matchedId: existing.id });
-        }
-        continue;
-      }
-      leadsFile.leads.push(draft);
-      addToIdx(draft, idx);
-      newLeads += 1;
-    }
-
-    await saveLeads(leadsFile);
     const imports = await loadImports();
-    const rec = {
-      id: importId,
-      filename: file.name,
-      createdAt: nowIso(),
-      totalRows: records.length,
-      newLeads,
-      alreadyExisting,
-      invalidRows,
-      storedPath: rel,
-    };
-    imports.imports.unshift(rec);
+    let rec = input.importId ? imports.imports.find((i) => i.id === input.importId) : undefined;
+    const importId = rec?.id || input.importId || newImportId();
+    const leadsFile = await loadLeads();
+    const stats = ingestRecords(records, headers, input.filename, importId, leadsFile);
+    await saveLeads(leadsFile);
+
+    if (rec) {
+      rec.totalRows += records.length;
+      rec.newLeads += stats.newLeads;
+      rec.alreadyExisting += stats.alreadyExisting;
+      rec.invalidRows += stats.invalidRows;
+    } else {
+      rec = {
+        id: importId,
+        filename: input.filename,
+        createdAt: nowIso(),
+        totalRows: records.length,
+        newLeads: stats.newLeads,
+        alreadyExisting: stats.alreadyExisting,
+        invalidRows: stats.invalidRows,
+        storedPath: input.storedPath,
+      };
+      imports.imports.unshift(rec);
+    }
     await saveImports(imports);
     await logActivity({
       type: "lead_imported",
-      metadata: { importId, filename: file.name, newLeads, alreadyExisting, invalidRows, totalRows: records.length },
+      metadata: {
+        importId,
+        filename: input.filename,
+        partLabel: input.partLabel,
+        newLeads: stats.newLeads,
+        alreadyExisting: stats.alreadyExisting,
+        invalidRows: stats.invalidRows,
+        totalRows: records.length,
+      },
     });
-    return { ...rec, duplicateSamples };
+    return { ...rec, ...stats, partLabel: input.partLabel };
   });
 }
 

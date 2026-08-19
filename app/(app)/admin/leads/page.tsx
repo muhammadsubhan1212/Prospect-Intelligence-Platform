@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Button, Card, Input } from "@/components/ui/primitives";
 import { OpsNav } from "@/components/ops/ops-nav";
 import { StatusBadge } from "@/components/ops/status-badge";
+import { splitCsvIntoParts, type SplitPlan } from "@/lib/ops-import-split";
 
 type LeadRow = {
   id: string;
@@ -53,11 +54,26 @@ export default function AdminLeadsPage() {
   const [editing, setEditing] = useState<LeadRow | null>(null);
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState({ name: "", company: "", title: "", email: "", phone: "", website: "", location: "" });
+  const [split, setSplit] = useState<SplitPlan | null>(null);
+  const [batchImportId, setBatchImportId] = useState("");
+  const [uploadingPart, setUploadingPart] = useState("");
+
+  async function readJson(res: Response) {
+    const text = await res.text();
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      if (res.status === 413 || /^Request En/i.test(text)) {
+        throw new Error("This part is over Vercel’s size limit. Use a smaller L-part.");
+      }
+      throw new Error(text.slice(0, 180) || `Request failed (${res.status})`);
+    }
+  }
 
   async function loadFiles() {
     const res = await fetch("/api/ops/imports");
-    const data = await res.json();
-    setFiles(data.imports || []);
+    const data = await readJson(res);
+    setFiles((data.imports as ImportFile[]) || []);
   }
 
   async function loadLeads(p = 1) {
@@ -67,17 +83,21 @@ export default function AdminLeadsPage() {
     if (available) params.set("available", "1");
     if (importId) params.set("importId", importId);
     const res = await fetch(`/api/ops/leads?${params}`);
-    const data = await res.json();
-    if (data.error) setError(data.error);
+    const data = await readJson(res);
+    if (data.error) setError(String(data.error));
     else {
-      setItems(data.items || []);
-      setTotal(data.total || 0);
-      setPage(data.page || 1);
+      setItems((data.items as LeadRow[]) || []);
+      setTotal(Number(data.total || 0));
+      setPage(Number(data.page || 1));
     }
   }
 
   async function refresh(p = 1) {
-    await Promise.all([loadFiles(), loadLeads(p)]);
+    try {
+      await Promise.all([loadFiles(), loadLeads(p)]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   useEffect(() => {
@@ -85,30 +105,67 @@ export default function AdminLeadsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, available, importId]);
 
-  async function onUpload(file: File | null) {
+  async function onPickFile(file: File | null) {
     if (!file) return;
-    setImporting(true);
     setError("");
     setResult("");
+    setImporting(true);
     try {
-      const fd = new FormData();
-      fd.set("file", file);
-      const res = await fetch("/api/ops/import", { method: "POST", body: fd });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        setError(data.error || `Upload failed (${res.status})`);
-      } else {
-        setResult(
-          `Imported ${data.filename || file.name}: ${data.totalRows} rows → ${data.newLeads} new, ${data.alreadyExisting} already in the pool (skipped), ${data.invalidRows} invalid.`
-        );
-        setImportId(data.id || "");
-        await refresh(1);
-      }
+      const text = await file.text();
+      const plan = splitCsvIntoParts(file.name, text);
+      if (!plan.totalRows) throw new Error("No data rows found. Save as CSV (not Excel) and try again.");
+      setSplit(plan);
+      setBatchImportId("");
+      setResult(
+        `${file.name}: ${plan.totalRows} rows split into ${plan.parts.length} part${plan.parts.length === 1 ? "" : "s"} (L1${plan.parts.length > 1 ? `–L${plan.parts.length}` : ""}). Upload each part separately.`
+      );
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
+      setSplit(null);
     } finally {
       setImporting(false);
       if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  async function uploadPart(partId: string) {
+    if (!split) return;
+    const part = split.parts.find((p) => p.id === partId);
+    if (!part || part.uploaded) return;
+    setUploadingPart(partId);
+    setError("");
+    try {
+      const res = await fetch("/api/ops/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: split.filename,
+          headers: split.headers,
+          records: part.records,
+          importId: batchImportId || undefined,
+          partLabel: part.label,
+        }),
+      });
+      const data = await readJson(res);
+      if (!res.ok || data.error) {
+        setError(String(data.error || `Upload failed (${res.status})`));
+        return;
+      }
+      const newId = String(data.id || batchImportId);
+      setBatchImportId(newId);
+      setImportId(newId);
+      setSplit({
+        ...split,
+        parts: split.parts.map((p) => (p.id === partId ? { ...p, uploaded: true } : p)),
+      });
+      setResult(
+        `${part.label} (rows ${part.rowFrom}–${part.rowTo}) imported → ${data.newLeads} new, ${data.alreadyExisting} already in pool, ${data.invalidRows} invalid.`
+      );
+      await refresh(1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setUploadingPart("");
     }
   }
 
@@ -184,10 +241,10 @@ export default function AdminLeadsPage() {
             type="file"
             accept=".csv,text/csv"
             className="hidden"
-            onChange={(e) => void onUpload(e.target.files?.[0] || null)}
+            onChange={(e) => void onPickFile(e.target.files?.[0] || null)}
           />
           <Button type="button" disabled={importing} onClick={() => fileRef.current?.click()}>
-            {importing ? "Importing…" : "Upload CSV"}
+            {importing ? "Reading file…" : "Choose CSV"}
           </Button>
           <Button type="button" variant="outline" onClick={() => { setCreating(true); setEditing(null); }}>
             Add lead
@@ -196,6 +253,42 @@ export default function AdminLeadsPage() {
       </div>
       {result ? <p className="mt-3 text-sm text-success">{result}</p> : null}
       {error ? <p className="mt-3 text-sm text-danger">{error}</p> : null}
+
+      {split ? (
+        <Card className="mt-4 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="font-medium">
+                {split.filename} = {split.parts.map((p) => p.label).join(" + ")}
+              </h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {split.totalRows} rows in {split.parts.length} part{split.parts.length === 1 ? "" : "s"}. Each part stays
+                under Vercel’s upload limit. Upload the ones you want, in any order.
+              </p>
+            </div>
+            <Button type="button" variant="ghost" size="sm" onClick={() => { setSplit(null); setBatchImportId(""); }}>
+              Clear split
+            </Button>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {split.parts.map((p) => (
+              <Button
+                key={p.id}
+                type="button"
+                variant={p.uploaded ? "secondary" : "outline"}
+                disabled={!!uploadingPart || p.uploaded}
+                onClick={() => void uploadPart(p.id)}
+              >
+                {uploadingPart === p.id
+                  ? `Uploading ${p.label}…`
+                  : p.uploaded
+                    ? `${p.label} uploaded`
+                    : `${p.label} · rows ${p.rowFrom}–${p.rowTo}`}
+              </Button>
+            ))}
+          </div>
+        </Card>
+      ) : null}
 
       <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         <button
