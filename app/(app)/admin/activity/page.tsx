@@ -9,7 +9,12 @@ type Event = {
   id: string;
   type: string;
   timestamp: string;
-  metadata?: { note?: string; message?: { to?: string; subject?: string; body?: string } };
+  metadata?: {
+    note?: string;
+    message?: { to?: string; subject?: string; body?: string };
+    reset?: boolean;
+    resetAt?: string;
+  };
 };
 
 type Thread = {
@@ -23,6 +28,7 @@ type Thread = {
   lastType: string;
   lastAt: string;
   types: string[];
+  reset?: boolean;
   events: Event[];
 };
 
@@ -46,6 +52,7 @@ function label(type: string) {
     bounced_cleared: "bounced undone",
     skipped: "skipped",
     skipped_cleared: "skipped undone",
+    lead_reset: "lead reset — returned to pool",
   };
   return names[type] || type.replace(/_/g, " ");
 }
@@ -75,7 +82,7 @@ export default function AdminActivityPage() {
       <OpsNav />
       <h1 className="text-2xl font-semibold tracking-tight">Activity</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        One row per operator and client. Open a row to see everything they did with that lead.
+        One row per operator and client. Open a row to see everything they did with that lead. Reset leads keep this history, marked Reset.
       </p>
       <div className="mt-4 flex flex-wrap gap-2">
         <Input placeholder="Search operator or company" value={q} onChange={(e) => setQ(e.target.value)} className="max-w-sm" />
@@ -88,7 +95,7 @@ export default function AdminActivityPage() {
           onChange={(e) => setType(e.target.value)}
         >
           <option value="">Any action in the thread</option>
-          {["lead_opened", "email_opened", "email_sent", "email_failed", "call_clicked", "call_no_answer", "called", "replied", "meeting", "skipped", "audit_created"].map((t) => (
+          {["lead_opened", "email_opened", "email_sent", "email_failed", "call_clicked", "call_no_answer", "called", "replied", "meeting", "skipped", "audit_created", "lead_reset"].map((t) => (
             <option key={t} value={t}>
               {label(t)}
             </option>
@@ -119,7 +126,14 @@ export default function AdminActivityPage() {
                   {t.company ? <span className="text-muted-foreground"> · {t.company}</span> : null}
                 </td>
                 <td className="px-3 py-3">{t.actionCount}</td>
-                <td className="px-3 py-3">{label(t.lastType)}</td>
+                <td className="px-3 py-3">
+                  {label(t.lastType)}
+                  {t.reset ? (
+                    <span className="ml-2 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-warning">
+                      Reset
+                    </span>
+                  ) : null}
+                </td>
                 <td className="px-3 py-3 text-muted-foreground">
                   {t.lastAt ? new Date(t.lastAt).toLocaleString() : "—"}
                 </td>
@@ -161,11 +175,27 @@ export default function AdminActivityPage() {
             </Link>
             <ol className="mt-4 space-y-3">
               {open.events.map((e) => (
-                <li key={e.id} className="rounded-lg border border-border p-3 text-sm">
+                <li
+                  key={e.id}
+                  className={`rounded-lg border p-3 text-sm ${
+                    e.type === "lead_reset"
+                      ? "border-warning bg-warning/10"
+                      : e.metadata?.reset
+                        ? "border-border bg-muted/30 opacity-70"
+                        : "border-border"
+                  }`}
+                >
                   <div className="flex justify-between gap-3">
-                    <span className="font-medium">{label(e.type)}</span>
+                    <span className={`font-medium ${e.metadata?.reset && e.type !== "lead_reset" ? "line-through" : ""}`}>
+                      {label(e.type)}
+                    </span>
                     <span className="text-xs text-muted-foreground">{new Date(e.timestamp).toLocaleString()}</span>
                   </div>
+                  {e.metadata?.reset && e.type !== "lead_reset" ? (
+                    <p className="mt-1 text-xs font-medium uppercase tracking-wide text-warning">
+                      Reset {e.metadata.resetAt ? `· ${new Date(e.metadata.resetAt).toLocaleString()}` : ""}
+                    </p>
+                  ) : null}
                   {e.metadata?.note ? <p className="mt-1 text-muted-foreground">{e.metadata.note}</p> : null}
                   {e.type.startsWith("email_") && e.metadata?.message?.body ? (
                     <div className="mt-2 rounded-md bg-muted/50 p-2">

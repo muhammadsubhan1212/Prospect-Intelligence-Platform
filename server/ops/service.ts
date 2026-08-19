@@ -38,12 +38,16 @@ import {
   withOpsLock,
   writeOpsFile,
 } from "./store";
-import type { Activity, ActivityType, LeadStatus, MasterLead, Operator } from "./types";
+import type { Activity, ActivityType, AllocationRecord, LeadStatus, MasterLead, Operator } from "./types";
 import { buildAuditDocument, renderAuditHtml } from "./audit";
 import { loadBrand } from "./brand";
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function activeTaken(allocations: AllocationRecord[]) {
+  return new Set(allocations.filter((a) => !a.resetAt).map((a) => a.leadId));
 }
 
 function todayStamp(d = new Date()) {
@@ -251,18 +255,17 @@ export async function importMasterRecords(input: {
   });
 }
 
-export async function listMasterLeads(opts: {
-  q?: string;
-  status?: string;
-  assignedTo?: string;
-  available?: boolean;
-  importId?: string;
-  page?: number;
-  pageSize?: number;
-}) {
-  const { leads } = await loadLeads();
-  const { allocations } = await loadAllocations();
-  const taken = new Set(allocations.map((a) => a.leadId));
+function filterMasterLeads(
+  leads: MasterLead[],
+  taken: Set<string>,
+  opts: {
+    q?: string;
+    status?: string;
+    assignedTo?: string;
+    available?: boolean;
+    importId?: string;
+  }
+) {
   const q = (opts.q || "").trim().toLowerCase();
   let rows = leads;
   if (q) {
@@ -278,6 +281,26 @@ export async function listMasterLeads(opts: {
   if (opts.assignedTo) rows = rows.filter((l) => l.assignedTo === opts.assignedTo);
   if (opts.importId) rows = rows.filter((l) => l.importId === opts.importId);
   if (opts.available) rows = rows.filter((l) => !taken.has(l.id));
+  return rows;
+}
+
+export async function listMasterLeads(opts: {
+  q?: string;
+  status?: string;
+  assignedTo?: string;
+  available?: boolean;
+  importId?: string;
+  page?: number;
+  pageSize?: number;
+  idsOnly?: boolean;
+}) {
+  const { leads } = await loadLeads();
+  const { allocations } = await loadAllocations();
+  const taken = activeTaken(allocations);
+  const rows = filterMasterLeads(leads, taken, opts);
+  if (opts.idsOnly) {
+    return { ids: rows.map((l) => l.id), items: [], total: rows.length, page: 1, pageSize: rows.length, totalPages: 1 };
+  }
   const page = Math.max(1, opts.page || 1);
   const pageSize = Math.min(200, Math.max(1, opts.pageSize || 50));
   const { operators } = await loadOperators();
@@ -335,7 +358,7 @@ export async function listImports() {
   const { imports } = await loadImports();
   const { leads } = await loadLeads();
   const { allocations } = await loadAllocations();
-  const taken = new Set(allocations.map((a) => a.leadId));
+  const taken = activeTaken(allocations);
   return imports.map((imp) => {
     const inFile = leads.filter((l) => l.importId === imp.id);
     return {
@@ -368,7 +391,7 @@ export async function deleteImport(id: string, opts?: { deleteLeads?: boolean })
     if (opts?.deleteLeads) {
       const leadsFile = await loadLeads();
       const allocFile = await loadAllocations();
-      const taken = new Set(allocFile.allocations.map((a) => a.leadId));
+      const taken = activeTaken(allocFile.allocations);
       const next: MasterLead[] = [];
       for (const lead of leadsFile.leads) {
         if (lead.importId !== id) {
@@ -469,13 +492,127 @@ export async function deleteLead(id: string) {
     const lead = leadsFile.leads.find((l) => l.id === id);
     if (!lead) throw new Error("Lead not found");
     const allocFile = await loadAllocations();
-    if (allocFile.allocations.some((a) => a.leadId === id)) {
-      throw new Error("This lead is allocated for outreach. Reassign or leave it; allocated leads stay in history.");
+    if (allocFile.allocations.some((a) => a.leadId === id && !a.resetAt)) {
+      throw new Error("This lead is allocated for outreach. Reset it first if you want it unassigned, then delete.");
     }
     leadsFile.leads = leadsFile.leads.filter((l) => l.id !== id);
     await saveLeads(leadsFile);
     await logActivity({ type: "lead_deleted", leadId: id, metadata: { name: lead.name, company: lead.company } });
     return { ok: true as const };
+  });
+}
+
+/** Unassign + clear outreach. Lead stays in the master pool. Old activity is kept and marked reset. */
+export async function resetMasterLeads(input: {
+  leadIds?: string[];
+  allMatching?: boolean;
+  q?: string;
+  status?: string;
+  assignedTo?: string;
+  available?: boolean;
+  importId?: string;
+  operatorId?: string;
+  batchId?: string;
+  allForOperator?: boolean;
+}) {
+  return withOpsLock(async () => {
+    const leadsFile = await loadLeads();
+    const allocFile = await loadAllocations();
+    const actFile = await loadActivities();
+    const taken = activeTaken(allocFile.allocations);
+    let ids = new Set((input.leadIds || []).filter(Boolean));
+    if (input.allMatching) {
+      ids = new Set(filterMasterLeads(leadsFile.leads, taken, input).map((l) => l.id));
+    }
+    if (input.batchId) {
+      const fromAlloc = allocFile.allocations
+        .filter(
+          (a) =>
+            a.allocationBatchId === input.batchId &&
+            !a.resetAt &&
+            (!input.operatorId ||
+              a.userId === input.operatorId ||
+              a.originalUserId === input.operatorId ||
+              a.currentUserId === input.operatorId)
+        )
+        .map((a) => a.leadId);
+      const fromLeads = leadsFile.leads
+        .filter(
+          (l) =>
+            l.assignedBatchId === input.batchId &&
+            (!input.operatorId || l.assignedTo === input.operatorId)
+        )
+        .map((l) => l.id);
+      ids = new Set([...fromAlloc, ...fromLeads]);
+    }
+    if (input.operatorId && input.allForOperator) {
+      const fromLeads = leadsFile.leads.filter((l) => l.assignedTo === input.operatorId).map((l) => l.id);
+      const fromAlloc = allocFile.allocations
+        .filter(
+          (a) =>
+            !a.resetAt &&
+            (a.userId === input.operatorId ||
+              a.currentUserId === input.operatorId ||
+              a.originalUserId === input.operatorId)
+        )
+        .map((a) => a.leadId);
+      ids = new Set([...fromLeads, ...fromAlloc]);
+    }
+    if (!ids.size) throw new Error("Select at least one lead to reset");
+
+    const ts = nowIso();
+    let reset = 0;
+    const samples: { id: string; name: string; previousAssignedTo?: string | null }[] = [];
+
+    for (const lead of leadsFile.leads) {
+      if (!ids.has(lead.id)) continue;
+      const previousAssignedTo = lead.assignedTo || null;
+      const previousStatus = lead.status;
+      const previousStatuses = lead.statuses || [];
+      const previousBatchId = lead.assignedBatchId;
+      const hadAllocation = taken.has(lead.id);
+      lead.assignedTo = null;
+      lead.assignedAt = undefined;
+      lead.assignedBatchId = undefined;
+      lead.status = "not_contacted";
+      lead.statuses = [];
+      lead.lastAction = "lead_reset";
+      lead.lastActionAt = ts;
+      lead.nextAction = undefined;
+      lead.lastDisclosure = undefined;
+      lead.updatedAt = ts;
+      reset += 1;
+      if (samples.length < 12) samples.push({ id: lead.id, name: lead.name, previousAssignedTo });
+      actFile.activities.push({
+        id: newActivityId(),
+        timestamp: ts,
+        leadId: lead.id,
+        userId: previousAssignedTo || undefined,
+        type: "lead_reset",
+        metadata: {
+          previousAssignedTo,
+          previousStatus,
+          previousStatuses,
+          hadAllocation,
+          batchId: input.batchId || previousBatchId,
+          operatorId: input.operatorId || previousAssignedTo,
+          note: "Lead reset. Returned to the master pool. Earlier actions kept and marked reset.",
+        },
+      });
+    }
+
+    for (const a of actFile.activities) {
+      if (!a.leadId || !ids.has(a.leadId) || a.type === "lead_reset") continue;
+      a.metadata = { ...(a.metadata || {}), reset: true, resetAt: ts };
+    }
+
+    for (const a of allocFile.allocations) {
+      if (ids.has(a.leadId) && !a.resetAt) a.resetAt = ts;
+    }
+    await saveLeads(leadsFile);
+    await saveAllocations(allocFile);
+    await saveActivities(actFile);
+    return { ok: true as const, reset, totalRequested: ids.size, samples };
   });
 }
 
@@ -500,13 +637,26 @@ export async function createOperator(input: { name: string; email?: string; phon
 
 export async function listOperators() {
   const { operators } = await loadOperators();
-  const { allocations } = await loadAllocations();
+  const { allocations, batches } = await loadAllocations();
   const { leads } = await loadLeads();
+  const active = allocations.filter((a) => !a.resetAt);
   return operators.map((op) => ({
     ...op,
     assignedCount: leads.filter((l) => l.assignedTo === op.id).length,
-    allocatedCount: allocations.filter((a) => a.originalUserId === op.id).length,
+    allocatedCount: active.filter((a) => a.originalUserId === op.id || a.currentUserId === op.id).length,
     url: `/operator/${op.id}`,
+    batches: batches
+      .filter((b) => b.userId === op.id)
+      .map((b) => {
+        const remainingAlloc = allocations.filter((a) => a.allocationBatchId === b.id && !a.resetAt).length;
+        const remainingAssigned = leads.filter((l) => l.assignedTo === op.id && l.assignedBatchId === b.id).length;
+        return {
+          id: b.id,
+          createdAt: b.createdAt,
+          count: b.count,
+          remaining: Math.max(remainingAlloc, remainingAssigned),
+        };
+      }),
   }));
 }
 
@@ -529,7 +679,7 @@ export async function getOperator(id: string) {
 export async function previewAllocation(count: number) {
   const { leads } = await loadLeads();
   const { allocations } = await loadAllocations();
-  const taken = new Set(allocations.map((a) => a.leadId));
+  const taken = activeTaken(allocations);
   const available = leads.filter((l) => !taken.has(l.id)).length;
   const n = Math.max(0, count);
   return { available, requested: n, willAssign: Math.min(n, available) };
@@ -550,7 +700,7 @@ export async function allocateLeads(input: {
 
     const leadsFile = await loadLeads();
     const allocFile = await loadAllocations();
-    const taken = new Set(allocFile.allocations.map((a) => a.leadId));
+    const taken = activeTaken(allocFile.allocations);
     const ts = nowIso();
     const batchId = newAllocBatchId();
 
@@ -666,6 +816,7 @@ export async function listActivityThreads(opts: { userId?: string; type?: string
       lastType: last?.type || "",
       lastAt: last?.timestamp || "",
       types: [...new Set(events.map((e) => e.type))],
+      reset: events.some((e) => e.type === "lead_reset" || Boolean(e.metadata?.reset)),
       events: events.map((a) => ({
         id: a.id,
         type: a.type,
@@ -742,7 +893,7 @@ export async function getOpsStats() {
   const { operators } = await loadOperators();
   const { activities } = await loadActivities();
   const { imports } = await loadImports();
-  const taken = new Set(allocations.map((a) => a.leadId));
+  const taken = activeTaken(allocations);
   const count = (s: LeadStatus) => leads.filter((l) => l.status === s).length;
   const todayActs = activities.filter((a) => isToday(a.timestamp));
   const sentish = leads.filter((l) => l.status !== "not_contacted" && l.status !== "skipped").length;
@@ -789,7 +940,7 @@ export async function getOpsStats() {
     byOperator: operators.map((op) => ({
       id: op.id,
       name: op.name,
-      allocated: allocations.filter((a) => a.originalUserId === op.id).length,
+      allocated: allocations.filter((a) => !a.resetAt && (a.originalUserId === op.id || a.currentUserId === op.id)).length,
       assignedNow: leads.filter((l) => l.assignedTo === op.id).length,
     })),
     batches: batches.slice(0, 12),

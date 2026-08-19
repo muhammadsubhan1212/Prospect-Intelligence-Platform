@@ -57,6 +57,9 @@ export default function AdminLeadsPage() {
   const [split, setSplit] = useState<SplitPlan | null>(null);
   const [batchImportId, setBatchImportId] = useState("");
   const [uploadingPart, setUploadingPart] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [resetting, setResetting] = useState(false);
+  const selectAllRef = useRef<HTMLInputElement>(null);
 
   async function readJson(res: Response) {
     const text = await res.text();
@@ -101,9 +104,76 @@ export default function AdminLeadsPage() {
   }
 
   useEffect(() => {
+    setSelected([]);
     void refresh(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, available, importId]);
+
+  useEffect(() => {
+    const el = selectAllRef.current;
+    if (!el) return;
+    const pageIds = items.map((l) => l.id);
+    const n = pageIds.filter((id) => selected.includes(id)).length;
+    el.checked = pageIds.length > 0 && n === pageIds.length;
+    el.indeterminate = n > 0 && n < pageIds.length;
+  }, [items, selected]);
+
+  function filterQuery() {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (status) params.set("status", status);
+    if (available) params.set("available", "1");
+    if (importId) params.set("importId", importId);
+    return params;
+  }
+
+  function toggleOne(id: string) {
+    setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  }
+
+  function togglePage(checked: boolean) {
+    const pageIds = items.map((l) => l.id);
+    setSelected((cur) => {
+      if (checked) return Array.from(new Set([...cur, ...pageIds]));
+      return cur.filter((id) => !pageIds.includes(id));
+    });
+  }
+
+  async function selectAllInView() {
+    const params = filterQuery();
+    params.set("idsOnly", "1");
+    const res = await fetch(`/api/ops/leads?${params}`);
+    const data = await readJson(res);
+    if (data.error) setError(String(data.error));
+    else setSelected((data.ids as string[]) || []);
+  }
+
+  async function resetLeads(body: Record<string, unknown>, confirmText: string) {
+    if (!confirm(confirmText)) return;
+    setResetting(true);
+    setError("");
+    setResult("");
+    try {
+      const res = await fetch("/api/ops/leads/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await readJson(res);
+      if (data.error) setError(String(data.error));
+      else {
+        setSelected([]);
+        setResult(
+          `Reset ${data.reset} lead${data.reset === 1 ? "" : "s"}. They stay in the master pool, unassigned. Activity logs stay and are marked Reset.`
+        );
+        await refresh(page);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setResetting(false);
+    }
+  }
 
   async function onPickFile(file: File | null) {
     if (!file) return;
@@ -314,6 +384,20 @@ export default function AdminLeadsPage() {
               <Button type="button" size="sm" variant="outline" onClick={() => void renameFile(f)}>
                 Rename
               </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={resetting}
+                onClick={() =>
+                  void resetLeads(
+                    { allMatching: true, importId: f.id },
+                    `Reset all leads in “${f.filename}”?\n\nThey stay in the master pool. Assignment, Sent/Called, and outreach history on the operator desk are cleared. Admin activity stays, marked Reset.\n\nThis does not delete the contacts.`
+                  )
+                }
+              >
+                Reset file
+              </Button>
               <Button type="button" size="sm" variant="danger" onClick={() => void removeFile(f)}>
                 Delete file
               </Button>
@@ -367,12 +451,41 @@ export default function AdminLeadsPage() {
           <input type="checkbox" checked={available} onChange={(e) => setAvailable(e.target.checked)} />
           Available only
         </label>
+        <Button type="button" variant="outline" onClick={() => void selectAllInView()} disabled={!total || resetting}>
+          Select all {total} in this view
+        </Button>
+        <Button
+          type="button"
+          variant="danger"
+          disabled={!selected.length || resetting}
+          onClick={() =>
+            void resetLeads(
+              { leadIds: selected },
+              `Reset ${selected.length} selected lead${selected.length === 1 ? "" : "s"}?\n\nContacts stay in master data. Operators lose these assignments. Sent/Called is cleared so they can be assigned again.\n\nAdmin activity for these leads stays, with a Reset mark.`
+            )
+          }
+        >
+          {resetting ? "Resetting…" : `Reset selected (${selected.length})`}
+        </Button>
       </div>
+      {selected.length ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          {selected.length} selected. Reset unassigns and clears outreach. It does not delete the lead.
+        </p>
+      ) : null}
 
       <Card className="mt-4 overflow-x-auto">
         <table className="w-full min-w-[980px] text-left text-sm">
           <thead className="border-b border-border text-xs text-muted-foreground">
             <tr>
+              <th className="px-3 py-2">
+                <input
+                  ref={selectAllRef}
+                  type="checkbox"
+                  aria-label="Select all on this page"
+                  onChange={(e) => togglePage(e.target.checked)}
+                />
+              </th>
               <th className="px-3 py-2">Name</th>
               <th className="px-3 py-2">Company</th>
               <th className="px-3 py-2">Title</th>
@@ -388,6 +501,14 @@ export default function AdminLeadsPage() {
           <tbody>
             {items.map((l) => (
               <tr key={l.id} className="border-b border-border/70">
+                <td className="px-3 py-2">
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(l.id)}
+                    onChange={() => toggleOne(l.id)}
+                    aria-label={`Select ${l.name}`}
+                  />
+                </td>
                 <td className="px-3 py-2">
                   <Link href={`/admin/leads/${l.id}`} className="text-accent hover:underline">
                     {l.name}
@@ -427,6 +548,20 @@ export default function AdminLeadsPage() {
                     >
                       Edit
                     </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={resetting}
+                      onClick={() =>
+                        void resetLeads(
+                          { leadIds: [l.id] },
+                          `Reset ${l.name}?\n\nThey stay in the master pool, unassigned. Activity stays, marked Reset.`
+                        )
+                      }
+                    >
+                      Reset
+                    </Button>
                     <Button type="button" size="sm" variant="ghost" onClick={() => void removeLead(l.id)}>
                       Delete
                     </Button>
@@ -436,7 +571,7 @@ export default function AdminLeadsPage() {
             ))}
             {!items.length ? (
               <tr>
-                <td className="px-3 py-8 text-center text-muted-foreground" colSpan={10}>
+                <td className="px-3 py-8 text-center text-muted-foreground" colSpan={11}>
                   No leads in this view. Use Upload CSV on this page (not New run).
                 </td>
               </tr>

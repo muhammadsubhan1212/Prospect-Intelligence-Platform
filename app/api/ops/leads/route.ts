@@ -14,6 +14,7 @@ export async function GET(req: Request) {
       available: url.searchParams.get("available") === "1",
       page: Number(url.searchParams.get("page") || 1),
       pageSize: Number(url.searchParams.get("pageSize") || 50),
+      idsOnly: url.searchParams.get("idsOnly") === "1",
     });
     return jsonOk(result);
   } catch (err) {

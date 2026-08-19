@@ -36,6 +36,7 @@ export const ACTIVITY_TYPES = [
   "audit_created",
   "audit_downloaded",
   "research_generated",
+  "lead_reset",
 ] as const;
 
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];
@@ -99,6 +100,8 @@ export type AllocationRecord = {
   /** Original owner — kept even if the lead is later reassigned. */
   originalUserId: string;
   currentUserId: string;
+  /** Set when admin resets this assignment so the lead can be allocated again. */
+  resetAt?: string;
 };
 
 export type AllocationBatch = {

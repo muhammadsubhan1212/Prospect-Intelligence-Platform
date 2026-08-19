@@ -70,6 +70,24 @@ export default function AdminLeadDetailPage() {
     else await load();
   }
 
+  async function resetLead() {
+    if (
+      !confirm(
+        `Reset ${lead?.name || "this lead"}?\n\nThey stay in the master pool, unassigned. Sent/Called is cleared so they can be assigned again. Activity stays, marked Reset.`
+      )
+    ) {
+      return;
+    }
+    const res = await fetch("/api/ops/leads/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ leadIds: [params.id] }),
+    });
+    const json = await res.json();
+    if (json.error) setError(json.error);
+    else await load();
+  }
+
   if (!lead && !error) return <p className="text-sm text-muted-foreground">Loading…</p>;
 
   return (
@@ -118,12 +136,15 @@ export default function AdminLeadDetailPage() {
               <Button type="button" onClick={() => void reassign()} disabled={!operatorId}>
                 Reassign
               </Button>
+              <Button type="button" variant="outline" onClick={() => void resetLead()}>
+                Reset lead
+              </Button>
               <Button type="button" variant="danger" onClick={() => void remove()}>
                 Delete lead
               </Button>
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              Reassignment changes current owner. It does not make the lead available for a fresh outreach batch.
+              Reset unassigns and returns the lead to the pool. Reassign only changes owner. Delete removes the contact.
             </p>
           </Card>
           <div className="mt-4">
@@ -154,13 +175,29 @@ export default function AdminLeadDetailPage() {
                 id: string;
                 type: string;
                 timestamp: string;
-                metadata?: { note?: string; message?: { to?: string; subject?: string; body?: string } };
+                metadata?: { note?: string; message?: { to?: string; subject?: string; body?: string }; reset?: boolean; resetAt?: string };
               }[]) || []).map((a) => (
-                <li key={a.id} className="rounded-lg border border-border/70 p-3">
+                <li
+                  key={a.id}
+                  className={`rounded-lg border p-3 ${
+                    a.type === "lead_reset"
+                      ? "border-warning bg-warning/10"
+                      : a.metadata?.reset
+                        ? "border-border/70 bg-muted/30 opacity-70"
+                        : "border-border/70"
+                  }`}
+                >
                   <div className="flex justify-between gap-3">
-                    <span className="font-medium">{a.type.replace(/_/g, " ")}</span>
+                    <span className={`font-medium ${a.metadata?.reset && a.type !== "lead_reset" ? "line-through" : ""}`}>
+                      {a.type.replace(/_/g, " ")}
+                    </span>
                     <span className="text-muted-foreground">{new Date(a.timestamp).toLocaleString()}</span>
                   </div>
+                  {a.metadata?.reset && a.type !== "lead_reset" ? (
+                    <p className="mt-1 text-xs font-medium uppercase tracking-wide text-warning">
+                      Reset {a.metadata.resetAt ? `· ${new Date(a.metadata.resetAt).toLocaleString()}` : ""}
+                    </p>
+                  ) : null}
                   {a.metadata?.note ? <p className="mt-1 text-muted-foreground">{a.metadata.note}</p> : null}
                   {a.type.startsWith("email_") && a.metadata?.message?.body ? (
                     <div className="mt-2 rounded bg-muted/40 p-2">
