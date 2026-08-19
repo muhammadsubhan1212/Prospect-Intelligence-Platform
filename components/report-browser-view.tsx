@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Maximize2, Minimize2, X, Download, Printer, Copy, Check } from "lucide-react";
 import { Button } from "@/components/ui/primitives";
+import { CopyLinkedin } from "@/components/copy-linkedin";
 import type { Lead, ProspectData } from "@/server/services/engine";
 
 type Props = {
@@ -187,7 +188,7 @@ export function ReportBrowserView({ reportId, company, data }: Props) {
             <Kv label="Role" value={lead.title} />
             <Kv label="Email" value={lead.email} />
             <Kv label="Phone" value={lead.phone} />
-            <Kv label="LinkedIn" value={lead.linkedin} />
+            <Kv label="LinkedIn" value={lead.linkedin ? <CopyLinkedin url={lead.linkedin} /> : "—"} />
             <Kv label="Buying style" value={String(dm.buyingStyle || "")} />
           </dl>
           {Array.isArray(dm.caresAbout) ? (

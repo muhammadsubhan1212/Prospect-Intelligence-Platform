@@ -116,7 +116,7 @@ function fromEngineLead(mapped: Lead, source: string, importId: string): MasterL
     email: email || undefined,
     phone: phone || undefined,
     website: mapped.website,
-    linkedin: mapped.linkedin,
+    linkedin: String(mapped.linkedin || "").trim() || undefined,
     location: locationFrom({ city: mapped.city, state: mapped.state, country: mapped.country }),
     city: mapped.city,
     state: mapped.state,
@@ -432,6 +432,7 @@ export async function createLead(input: {
   email?: string;
   phone?: string;
   website?: string;
+  linkedin?: string;
   location?: string;
   importId?: string;
 }) {
@@ -450,6 +451,7 @@ export async function createLead(input: {
       email: email || undefined,
       phone: phone || undefined,
       website: input.website?.trim() || undefined,
+      linkedin: input.linkedin?.trim() || undefined,
       location: input.location?.trim() || undefined,
       source: "manual",
       importId: input.importId,
@@ -487,18 +489,63 @@ export async function updateLead(id: string, patch: Partial<MasterLead>) {
 }
 
 export async function deleteLead(id: string) {
+  return deleteMasterLeads({ leadIds: [id] });
+}
+
+/** Remove leads from the master pool. Active assignments are dropped. Activity stays, marked deleted. */
+export async function deleteMasterLeads(input: {
+  leadIds?: string[];
+  allMatching?: boolean;
+  q?: string;
+  status?: string;
+  assignedTo?: string;
+  available?: boolean;
+  importId?: string;
+}) {
   return withOpsLock(async () => {
     const leadsFile = await loadLeads();
-    const lead = leadsFile.leads.find((l) => l.id === id);
-    if (!lead) throw new Error("Lead not found");
     const allocFile = await loadAllocations();
-    if (allocFile.allocations.some((a) => a.leadId === id && !a.resetAt)) {
-      throw new Error("This lead is allocated for outreach. Reset it first if you want it unassigned, then delete.");
+    const actFile = await loadActivities();
+    const taken = activeTaken(allocFile.allocations);
+    let ids = new Set((input.leadIds || []).filter(Boolean));
+    if (input.allMatching) {
+      ids = new Set(filterMasterLeads(leadsFile.leads, taken, input).map((l) => l.id));
     }
-    leadsFile.leads = leadsFile.leads.filter((l) => l.id !== id);
+    if (!ids.size) throw new Error("Select at least one lead to delete");
+
+    const ts = nowIso();
+    const removed: { id: string; name: string }[] = [];
+    leadsFile.leads = leadsFile.leads.filter((lead) => {
+      if (!ids.has(lead.id)) return true;
+      removed.push({ id: lead.id, name: lead.name });
+      actFile.activities.push({
+        id: newActivityId(),
+        timestamp: ts,
+        leadId: lead.id,
+        userId: lead.assignedTo || undefined,
+        type: "lead_deleted",
+        metadata: {
+          name: lead.name,
+          company: lead.company,
+          importId: lead.importId,
+          note: "Lead deleted from the master pool.",
+        },
+      });
+      return false;
+    });
+
+    for (const a of actFile.activities) {
+      if (!a.leadId || !ids.has(a.leadId) || a.type === "lead_deleted") continue;
+      a.metadata = { ...(a.metadata || {}), deleted: true, deletedAt: ts };
+    }
+    for (const a of allocFile.allocations) {
+      if (ids.has(a.leadId) && !a.resetAt) a.resetAt = ts;
+    }
+
     await saveLeads(leadsFile);
-    await logActivity({ type: "lead_deleted", leadId: id, metadata: { name: lead.name, company: lead.company } });
-    return { ok: true as const };
+    await saveAllocations(allocFile);
+    await saveActivities(actFile);
+    return { ok: true as const, deleted: removed.length, totalRequested: ids.size, samples: removed.slice(0, 12) };
   });
 }
 

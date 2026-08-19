@@ -12,6 +12,7 @@ import {
   scrubEmailText,
 } from "@/lib/email-deliverability";
 import { GTM } from "@/lib/gtm-defaults";
+import { CopyLinkedin } from "@/components/copy-linkedin";
 
 type QueueStatus = "pending" | "opened_gmail" | "sent" | "skipped" | "failed";
 
@@ -19,6 +20,7 @@ type QueueItem = {
   id: string;
   company: string;
   fullName: string;
+  linkedin?: string;
   email: string;
   firstOffer?: string;
   emailSubject?: string;
@@ -591,6 +593,7 @@ export default function SendQueuePage() {
               <tr>
                 <th className="px-4 py-3 font-medium">Company</th>
                 <th className="px-4 py-3 font-medium">Contact</th>
+                <th className="px-4 py-3 font-medium">LinkedIn</th>
                 <th className="px-4 py-3 font-medium">Email</th>
                 <th className="px-4 py-3 font-medium">Offer</th>
                 <th className="px-4 py-3 font-medium">Subject</th>
@@ -601,7 +604,7 @@ export default function SendQueuePage() {
             <tbody>
               {visible.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-10 text-center text-muted-foreground">
+                  <td colSpan={8} className="px-4 py-10 text-center text-muted-foreground">
                     No rows in this filter.{" "}
                     <Link href="/reports/new" className="text-accent hover:underline">
                       New run
@@ -620,6 +623,9 @@ export default function SendQueuePage() {
                         </Link>
                       </td>
                       <td className="px-4 py-3 text-muted-foreground">{item.fullName || "—"}</td>
+                      <td className="px-4 py-3">
+                        <CopyLinkedin url={item.linkedin} compact />
+                      </td>
                       <td className="max-w-[160px] truncate px-4 py-3 text-muted-foreground">
                         {item.compose?.to || item.email || "—"}
                       </td>

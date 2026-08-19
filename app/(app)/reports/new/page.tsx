@@ -32,6 +32,7 @@ import {
   saveCsvText,
 } from "@/lib/csv-workspace";
 import { cacheReportsFromGenerate } from "@/lib/report-cache";
+import { CopyLinkedin } from "@/components/copy-linkedin";
 
 type UploadMeta = {
   id: string;
@@ -50,6 +51,7 @@ type MappedRow = {
   website: string;
   title?: string;
   phone?: string;
+  linkedin?: string;
   _rowIndex?: number;
 };
 
@@ -926,19 +928,20 @@ function NewReportInner() {
                     <th className="px-4 py-3 font-medium">Company</th>
                     <th className="px-4 py-3 font-medium">Title</th>
                     <th className="px-4 py-3 font-medium">Email</th>
+                    <th className="px-4 py-3 font-medium">LinkedIn</th>
                     <th className="px-4 py-3 font-medium">Website</th>
                   </tr>
                 </thead>
                 <tbody>
                   {loadingPage ? (
                     <tr>
-                      <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
+                      <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
                         Loading rows…
                       </td>
                     </tr>
                   ) : rows.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
+                      <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
                         No rows match.
                       </td>
                     </tr>
@@ -959,6 +962,9 @@ function NewReportInner() {
                           <td className="px-4 py-2">{r.company || "—"}</td>
                           <td className="px-4 py-2 text-muted-foreground">{r.title || "—"}</td>
                           <td className="px-4 py-2 text-muted-foreground">{r.email || "—"}</td>
+                          <td className="px-4 py-2" onClick={(e) => e.stopPropagation()}>
+                            <CopyLinkedin url={r.linkedin} compact />
+                          </td>
                           <td className="max-w-[220px] truncate px-4 py-2 text-muted-foreground">{r.website || "—"}</td>
                         </tr>
                       );

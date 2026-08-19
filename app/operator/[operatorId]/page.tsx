@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { Card } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/ops/status-badge";
+import { CopyLinkedin } from "@/components/copy-linkedin";
 
 type Dash = {
   operator: { id: string; name: string; active: boolean };
@@ -31,6 +32,7 @@ type QueueLead = {
   title?: string;
   email?: string;
   phone?: string;
+  linkedin?: string;
   status: string;
   statuses?: string[];
 };
@@ -73,11 +75,20 @@ export default function OperatorDeskPage() {
         {(dash.queue.length ? dash.queue : dash.leads).map((l) => (
           <Link key={l.id} href={`/operator/${params.operatorId}/leads/${l.id}`}>
             <Card className="flex items-center justify-between gap-3 p-4 hover:bg-muted/40">
-              <div>
+              <div className="min-w-0">
                 <div className="font-medium">{l.name}</div>
                 <div className="text-sm text-muted-foreground">
                   {l.company}
                   {l.title ? ` · ${l.title}` : ""}
+                </div>
+                <div
+                  className="mt-1"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }}
+                >
+                  <CopyLinkedin url={l.linkedin} compact />
                 </div>
               </div>
               <div className="flex flex-wrap justify-end gap-1">

@@ -7,6 +7,7 @@ import { Button, Card } from "@/components/ui/primitives";
 import { OpsNav } from "@/components/ops/ops-nav";
 import { StatusBadge } from "@/components/ops/status-badge";
 import { ActionCardPanel } from "@/components/action-card-panel";
+import { CopyLinkedin } from "@/components/copy-linkedin";
 
 export default function AdminLeadDetailPage() {
   const params = useParams<{ id: string }>();
@@ -38,6 +39,7 @@ export default function AdminLeadDetailPage() {
     email?: string;
     phone?: string;
     website?: string;
+    linkedin?: string;
     location?: string;
     status: string;
     statuses?: string[];
@@ -115,6 +117,9 @@ export default function AdminLeadDetailPage() {
             <div>Email: {lead.email || "—"}</div>
             <div>Phone: {lead.phone || "—"}</div>
             <div>Website: {lead.website || "—"}</div>
+            <div className="flex items-center gap-2">
+              <span>LinkedIn:</span> <CopyLinkedin url={lead.linkedin} />
+            </div>
             <div>Location: {lead.location || "—"}</div>
             <div>Assigned: {String(data?.assignedName || "—")}</div>
           </Card>

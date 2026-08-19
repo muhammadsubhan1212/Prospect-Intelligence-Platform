@@ -19,12 +19,14 @@ import { StatusBadge } from "@/components/status-badge";
 import { BulkActionBar } from "@/components/bulk-action-bar";
 import { formatDate } from "@/lib/utils";
 import { GTM, PRODUCT } from "@/lib/gtm-defaults";
+import { CopyLinkedin } from "@/components/copy-linkedin";
 
 type Report = {
   id: string;
   batchId?: string;
   company: string;
   fullName: string;
+  linkedin?: string;
   status: string;
   createdAt: string;
   decision?: string;
@@ -422,6 +424,7 @@ export default function DashboardPage() {
                 </th>
                 <th className="px-5 py-3 font-medium">Company</th>
                 <th className="px-5 py-3 font-medium">Contact</th>
+                <th className="px-5 py-3 font-medium">LinkedIn</th>
                 <th className="px-5 py-3 font-medium">Decision</th>
                 <th className="px-5 py-3 font-medium">Status</th>
                 <th className="px-5 py-3 font-medium">Created</th>
@@ -431,7 +434,7 @@ export default function DashboardPage() {
             <tbody>
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-5 py-10 text-center text-muted-foreground">
+                  <td colSpan={8} className="px-5 py-10 text-center text-muted-foreground">
                     No lists yet.{" "}
                     <Link href="/reports/new" className="text-accent hover:underline">
                       Upload a CSV
@@ -453,6 +456,9 @@ export default function DashboardPage() {
                       </Link>
                     </td>
                     <td className="px-5 py-3 text-muted-foreground">{r.fullName || "—"}</td>
+                    <td className="px-5 py-3">
+                      <CopyLinkedin url={r.linkedin} compact />
+                    </td>
                     <td className="px-5 py-3">
                       {r.decision ? (
                         <Badge

@@ -7,6 +7,7 @@ import { Button, Card, Input } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/ops/status-badge";
 import { ActionCardPanel, type ActionCardData } from "@/components/action-card-panel";
 import { buildGmailComposeUrl, openGmailComposeWindow } from "@/components/send-email-dialog";
+import { CopyLinkedin } from "@/components/copy-linkedin";
 
 const OUTCOMES = [
   { action: "email_sent", label: "Sent", status: "sent" },
@@ -65,6 +66,7 @@ export default function OperatorLeadPage() {
     email?: string;
     phone?: string;
     website?: string;
+    linkedin?: string;
     location?: string;
     status: string;
     statuses?: string[];
@@ -219,6 +221,9 @@ export default function OperatorLeadPage() {
         <div>Email: {lead.email || "—"}</div>
         <div>Phone: {lead.phone || "—"}</div>
         <div>Website: {lead.website || "—"}</div>
+        <div className="flex items-center gap-2">
+          <span>LinkedIn:</span> <CopyLinkedin url={lead.linkedin} />
+        </div>
         <div>Location: {lead.location || "—"}</div>
       </Card>
 

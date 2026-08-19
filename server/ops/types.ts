@@ -37,6 +37,7 @@ export const ACTIVITY_TYPES = [
   "audit_downloaded",
   "research_generated",
   "lead_reset",
+  "lead_deleted",
 ] as const;
 
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];

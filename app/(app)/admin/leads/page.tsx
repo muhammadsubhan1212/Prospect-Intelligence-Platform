@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Button, Card, Input } from "@/components/ui/primitives";
 import { OpsNav } from "@/components/ops/ops-nav";
 import { StatusBadge } from "@/components/ops/status-badge";
+import { CopyLinkedin } from "@/components/copy-linkedin";
 import { splitCsvIntoParts, type SplitPlan } from "@/lib/ops-import-split";
 
 type LeadRow = {
@@ -15,6 +16,7 @@ type LeadRow = {
   email?: string;
   phone?: string;
   website?: string;
+  linkedin?: string;
   location?: string;
   status: string;
   assignedTo?: string | null;
@@ -53,7 +55,8 @@ export default function AdminLeadsPage() {
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<LeadRow | null>(null);
   const [creating, setCreating] = useState(false);
-  const [draft, setDraft] = useState({ name: "", company: "", title: "", email: "", phone: "", website: "", location: "" });
+  const [draft, setDraft] = useState({ name: "", company: "", title: "", email: "", phone: "", website: "", linkedin: "", location: "" });
+  const [deleting, setDeleting] = useState(false);
   const [split, setSplit] = useState<SplitPlan | null>(null);
   const [batchImportId, setBatchImportId] = useState("");
   const [uploadingPart, setUploadingPart] = useState("");
@@ -175,6 +178,31 @@ export default function AdminLeadsPage() {
     }
   }
 
+  async function deleteLeads(body: Record<string, unknown>, confirmText: string) {
+    if (!confirm(confirmText)) return;
+    setDeleting(true);
+    setError("");
+    setResult("");
+    try {
+      const res = await fetch("/api/ops/leads/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await readJson(res);
+      if (data.error) setError(String(data.error));
+      else {
+        setSelected([]);
+        setResult(`Deleted ${data.deleted} lead${data.deleted === 1 ? "" : "s"} from the master pool.`);
+        await refresh(1);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   async function onPickFile(file: File | null) {
     if (!file) return;
     setError("");
@@ -252,7 +280,7 @@ export default function AdminLeadsPage() {
     else {
       setEditing(null);
       setCreating(false);
-      setDraft({ name: "", company: "", title: "", email: "", phone: "", website: "", location: "" });
+      setDraft({ name: "", company: "", title: "", email: "", phone: "", website: "", linkedin: "", location: "" });
       await refresh(page);
     }
   }
@@ -409,7 +437,7 @@ export default function AdminLeadsPage() {
       {(creating || editing) ? (
         <Card className="mt-4 grid gap-3 p-5 sm:grid-cols-2">
           <h2 className="sm:col-span-2 font-medium">{editing ? "Edit lead" : "Add lead"}</h2>
-          {(["name", "company", "title", "email", "phone", "website", "location"] as const).map((key) => (
+          {(["name", "company", "title", "email", "phone", "website", "linkedin", "location"] as const).map((key) => (
             <Input
               key={key}
               placeholder={key}
@@ -447,17 +475,29 @@ export default function AdminLeadsPage() {
             </option>
           ))}
         </select>
+        <select
+          className="h-10 rounded-lg border border-border bg-card px-3 text-sm"
+          value={importId}
+          onChange={(e) => setImportId(e.target.value)}
+        >
+          <option value="">All uploaded CSV files</option>
+          {files.map((f) => (
+            <option key={f.id} value={f.id}>
+              {f.filename} ({f.leadCount})
+            </option>
+          ))}
+        </select>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={available} onChange={(e) => setAvailable(e.target.checked)} />
           Available only
         </label>
-        <Button type="button" variant="outline" onClick={() => void selectAllInView()} disabled={!total || resetting}>
+        <Button type="button" variant="outline" onClick={() => void selectAllInView()} disabled={!total || resetting || deleting}>
           Select all {total} in this view
         </Button>
         <Button
           type="button"
-          variant="danger"
-          disabled={!selected.length || resetting}
+          variant="outline"
+          disabled={!selected.length || resetting || deleting}
           onClick={() =>
             void resetLeads(
               { leadIds: selected },
@@ -466,6 +506,38 @@ export default function AdminLeadsPage() {
           }
         >
           {resetting ? "Resetting…" : `Reset selected (${selected.length})`}
+        </Button>
+        <Button
+          type="button"
+          variant="danger"
+          disabled={!selected.length || resetting || deleting}
+          onClick={() =>
+            void deleteLeads(
+              { leadIds: selected },
+              `Delete ${selected.length} selected lead${selected.length === 1 ? "" : "s"} from the master pool?\n\nThis removes the contacts. Assignments are dropped. Activity stays, marked deleted.`
+            )
+          }
+        >
+          {deleting ? "Deleting…" : `Delete selected (${selected.length})`}
+        </Button>
+        <Button
+          type="button"
+          variant="danger"
+          disabled={!total || resetting || deleting}
+          onClick={() =>
+            void deleteLeads(
+              {
+                allMatching: true,
+                q: q || undefined,
+                status: status || undefined,
+                available: available || undefined,
+                importId: importId || undefined,
+              },
+              `Delete all ${total} lead${total === 1 ? "" : "s"} in this filtered view${activeFile ? ` (${activeFile.filename})` : ""}?\n\nThis removes them from the master pool. Use Reset if you only want to unassign.`
+            )
+          }
+        >
+          Delete filtered ({total})
         </Button>
       </div>
       {selected.length ? (
@@ -492,6 +564,7 @@ export default function AdminLeadsPage() {
               <th className="px-3 py-2">Email</th>
               <th className="px-3 py-2">Phone</th>
               <th className="px-3 py-2">Website</th>
+              <th className="px-3 py-2">LinkedIn</th>
               <th className="px-3 py-2">File</th>
               <th className="px-3 py-2">Status</th>
               <th className="px-3 py-2">Assigned</th>
@@ -519,6 +592,9 @@ export default function AdminLeadsPage() {
                 <td className="px-3 py-2">{l.email || "—"}</td>
                 <td className="px-3 py-2">{l.phone || "—"}</td>
                 <td className="px-3 py-2">{l.website || "—"}</td>
+                <td className="px-3 py-2">
+                  <CopyLinkedin url={l.linkedin} />
+                </td>
                 <td className="px-3 py-2 text-xs text-muted-foreground">
                   {files.find((f) => f.id === l.importId)?.filename || l.source || "—"}
                 </td>
@@ -542,6 +618,7 @@ export default function AdminLeadsPage() {
                           email: l.email || "",
                           phone: l.phone || "",
                           website: l.website || "",
+                          linkedin: l.linkedin || "",
                           location: l.location || "",
                         });
                       }}
@@ -571,7 +648,7 @@ export default function AdminLeadsPage() {
             ))}
             {!items.length ? (
               <tr>
-                <td className="px-3 py-8 text-center text-muted-foreground" colSpan={11}>
+                <td className="px-3 py-8 text-center text-muted-foreground" colSpan={12}>
                   No leads in this view. Use Upload CSV on this page (not New run).
                 </td>
               </tr>

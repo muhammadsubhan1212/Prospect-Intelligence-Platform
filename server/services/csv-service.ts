@@ -173,6 +173,7 @@ export async function previewCsv(
           lead.title,
           lead.website,
           lead.phone,
+          lead.linkedin,
           ...Object.values(raw),
         ]
           .join(" ")

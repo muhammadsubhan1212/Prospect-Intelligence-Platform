@@ -53,6 +53,7 @@ function label(type: string) {
     skipped: "skipped",
     skipped_cleared: "skipped undone",
     lead_reset: "lead reset — returned to pool",
+    lead_deleted: "lead deleted from master pool",
   };
   return names[type] || type.replace(/_/g, " ");
 }
@@ -95,7 +96,7 @@ export default function AdminActivityPage() {
           onChange={(e) => setType(e.target.value)}
         >
           <option value="">Any action in the thread</option>
-          {["lead_opened", "email_opened", "email_sent", "email_failed", "call_clicked", "call_no_answer", "called", "replied", "meeting", "skipped", "audit_created", "lead_reset"].map((t) => (
+          {["lead_opened", "email_opened", "email_sent", "email_failed", "call_clicked", "call_no_answer", "called", "replied", "meeting", "skipped", "audit_created", "lead_reset", "lead_deleted"].map((t) => (
             <option key={t} value={t}>
               {label(t)}
             </option>

@@ -127,6 +127,14 @@ export function mapRowClient(row: Record<string, string>, index: number) {
     email: pick(row, ["Email", "Work Email", "Email Address"]),
     website: pick(row, ["Website", "Company Website", "URL"]),
     phone: pick(row, ["Corporate Phone", "Work Direct Phone", "Mobile Phone", "Phone"]).replace(/^'/, ""),
+    linkedin: pick(row, [
+      "Person Linkedin Url",
+      "LinkedIn Url",
+      "LinkedIn",
+      "Linkedin",
+      "Person LinkedIn URL",
+      "linkedin_url",
+    ]),
   };
 }
 
@@ -139,7 +147,7 @@ export function paginateClient(
   const mapped = records.map((r, i) => mapRowClient(r, i + 1));
   const filtered = q
     ? mapped.filter((m) =>
-        [m.fullName, m.company, m.email, m.title, m.website, m.phone].join(" ").toLowerCase().includes(q)
+        [m.fullName, m.company, m.email, m.title, m.website, m.phone, m.linkedin].join(" ").toLowerCase().includes(q)
       )
     : mapped;
   const totalRows = filtered.length;

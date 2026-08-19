@@ -7,6 +7,7 @@ import { Download, Search, Mail } from "lucide-react";
 import { Badge, Button, Card, Checkbox, Input } from "@/components/ui/primitives";
 import { StatusBadge } from "@/components/status-badge";
 import { BulkActionBar } from "@/components/bulk-action-bar";
+import { CopyLinkedin } from "@/components/copy-linkedin";
 import { formatDate } from "@/lib/utils";
 
 type Report = {
@@ -14,6 +15,7 @@ type Report = {
   batchId?: string;
   company: string;
   fullName: string;
+  linkedin?: string;
   status: string;
   createdAt: string;
   websiteScore?: number;
@@ -232,6 +234,7 @@ function ReportsInner() {
                 <th className="px-4 py-3 font-medium" />
                 <th className="px-4 py-3 font-medium">Company</th>
                 <th className="px-4 py-3 font-medium">Contact</th>
+                <th className="px-4 py-3 font-medium">LinkedIn</th>
                 <th className="px-4 py-3 font-medium">Decision</th>
                 <th className="px-4 py-3 font-medium">Tracking</th>
                 <th className="px-4 py-3 font-medium">Offer</th>
@@ -252,6 +255,9 @@ function ReportsInner() {
                     <div className="text-xs text-muted-foreground">{formatDate(r.createdAt)}</div>
                   </td>
                   <td className="px-4 py-3 text-muted-foreground">{r.fullName || "—"}</td>
+                  <td className="px-4 py-3">
+                    <CopyLinkedin url={r.linkedin} compact />
+                  </td>
                   <td className="px-4 py-3">
                     {r.decision ? (
                       <Badge tone={r.decision === "CONTACT" ? "success" : r.decision === "SKIP" ? "danger" : "warning"}>

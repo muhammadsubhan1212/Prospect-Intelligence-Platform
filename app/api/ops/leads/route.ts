@@ -31,6 +31,7 @@ export async function POST(req: Request) {
       email?: string;
       phone?: string;
       website?: string;
+      linkedin?: string;
       location?: string;
       importId?: string;
     };
