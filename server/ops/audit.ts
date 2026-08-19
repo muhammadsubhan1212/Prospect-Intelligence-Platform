@@ -211,27 +211,62 @@ export function buildAuditDocument(lead: MasterLead, data: ProspectData | null):
   }
 
   const who = text(overview.whoTheyAre as string) || text(overview.whatTheySell as string);
-  const exec = siteDown
-    ? `${company} was reviewed, but the live website could not be loaded. That is the first commercial issue: visitors, ads, and referrals cannot convert on a page that does not respond. This note does not invent on-page problems. It states what could and could not be verified, and the next useful move.`
+  const top = priorities[0];
+  const hookQuestion = siteDown
+    ? `If a stranger Googles ${company} right now and the site does not load — what happens to that job?`
+    : followUp.length
+      ? `When someone enquires after hours, who answers them — your process, or your competitor?`
+      : booking.length
+        ? `If a ready buyer wants a time today, can they book it without waiting for you?`
+        : `If this page had to create one conversation this week, would a first-time visitor know exactly what to do?`;
+
+  const visitorStory = siteDown
+    ? `A visitor types the URL. Nothing useful happens. They do not email to complain. They leave. You never hear about it, so it feels like “quiet week” instead of lost demand.`
+    : `A first-time visitor lands${website ? ` on ${website}` : ""}. They scan. ${
+        top
+          ? `The public evidence points to this friction: ${top.finding.toLowerCase()}.`
+          : "They decide in seconds whether this looks easy or like work."
+      } If the next step is fuzzy, they do not argue. They close the tab.`;
+
+  const uncomfortableQuestions = siteDown
+    ? [
+        "How many paid clicks landed on a URL that did not respond this month?",
+        "If this happened to a competitor, would you still trust their operation?",
+        "Who on the team is actually responsible for “the site just working”?",
+      ]
     : [
-        `${company} was reviewed as a ${lead.industry || "service"} business${website ? ` at ${website}` : ""}.`,
+        followUp.length ? "What is your real reply time on a Tuesday at 9:14pm — not the intended one?" : "Which page is supposed to create the enquiry: home, services, or contact?",
+        booking.length ? "Can a hot lead book you without a phone tag?" : "If you removed the logo, would a stranger still know what to do next?",
+        "If enquiries dropped 20% and traffic stayed flat, would you notice the leak or blame the market?",
+        "Are you paying for attention the page cannot convert?",
+      ].filter(Boolean);
+
+  const exec = siteDown
+    ? `${company} was reviewed. The live website could not be loaded. That is not a design nit. It is a commercial stop: ads, referrals, and returning customers cannot convert on a page that does not answer. This note does not invent on-page issues. It asks the only useful question: is this what your buyers also hit?`
+    : [
+        `${company} was reviewed as a ${lead.industry || "service"} business${website ? ` (${website})` : ""}.`,
         who ? takeSentences(who, 1) : "",
-        priorities[0]
-          ? `The highest-confidence issue is ${priorities[0].finding.toLowerCase()} — ${priorities[0].evidence || "based on public page evidence"}.`
+        top
+          ? `The sharpest public issue is not “the brand”. It is ${top.finding.toLowerCase()} — ${top.evidence || "from what the page actually shows"}.`
           : summary,
+        "Read this as a buyer would: impatient, comparing, and one tap from leaving.",
       ]
         .filter(Boolean)
         .join(" ");
 
   const commercialCost = siteDown
-    ? "Every visit while the site is unreachable is a wasted enquiry. That is a pipeline problem, not a branding problem."
+    ? "Silence is not “no demand”. It is demand you cannot see. Every failed load looks like a quiet pipeline."
     : followUp.length
-      ? "Most lost jobs in this market die between first click and first human reply. That gap is recoverable without buying more leads."
-      : "Unclear next steps on a website tax every campaign. Fixing the path usually pays before increasing ad spend.";
+      ? "Most lost work dies between first click and first human reply. You do not need more leads until the ones you already paid for are answered."
+      : "A vague next step taxes every campaign. You keep buying traffic. The page keeps wasting it.";
+
+  const ifNothingChanges = siteDown
+    ? "If nothing changes, next month looks like this month: spend, silence, and a story about “the market”."
+    : "If nothing changes, the same leaks keep running. Traffic reports stay busy. The diary does not.";
 
   const conversationAngle = siteDown
-    ? `I tried to review ${company}'s site and could not load it. If that is what customers see, it is worth 15 minutes to confirm the live URL and what should happen next.`
-    : `I went through ${company}'s public pages and noted a specific conversion gap${priorities[0] ? ` (${priorities[0].finding.toLowerCase()})` : ""}. Happy to walk through the evidence and a 30-day fix — no pitch deck.`;
+    ? `I tried to open ${company}'s site the way a customer would. It did not load. If that is what buyers see, fifteen minutes to confirm the live URL is cheaper than another month of guesswork.`
+    : `I went through ${company}'s public pages as a first-time buyer. One friction stood out${top ? ` — ${top.finding.toLowerCase()}` : ""}. The useful conversation is not “do you want marketing?”. It is: what happens to the next ten visitors who almost enquired?`;
 
   return {
     id: newAuditId(),
@@ -241,6 +276,9 @@ export function buildAuditDocument(lead: MasterLead, data: ProspectData | null):
     date: new Date().toISOString(),
     title: `Website & conversion review — ${company}`,
     executiveSummary: exec,
+    hookQuestion,
+    visitorStory,
+    uncomfortableQuestions,
     whatsWorking,
     conversion,
     followUp,
@@ -251,6 +289,7 @@ export function buildAuditDocument(lead: MasterLead, data: ProspectData | null):
     thirtyDayPlan,
     conversationAngle,
     commercialCost,
+    ifNothingChanges,
     nextStep: { offer, why },
     notObserved,
   };
@@ -291,6 +330,7 @@ export function renderAuditHtml(doc: AuditDocument): string {
     th { background: #f3f6f8; }
     footer { margin-top: 36px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font: 12px/1.45 ui-sans-serif, system-ui; }
     .next { background: #f2faf9; border: 1px solid #cde8e6; padding: 14px 16px; }
+    .hook { font-size: 20px; line-height: 1.35; margin: 0 0 22px; color: #0b1c2c; }
     @media print { body { background:#fff; } .page { padding: 0; } }
   </style>
 </head>
@@ -305,9 +345,17 @@ export function renderAuditHtml(doc: AuditDocument): string {
         · ${esc(new Date(doc.date).toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" }))}
       </div>
     </header>
+    ${doc.hookQuestion ? `<p class="hook">${esc(doc.hookQuestion)}</p>` : ""}
     <h2>1. Executive summary</h2>
     <p>${esc(doc.executiveSummary)}</p>
-    ${doc.commercialCost ? `<p><strong>Commercial implication.</strong> ${esc(doc.commercialCost)}</p>` : ""}
+    ${doc.visitorStory ? `<p>${esc(doc.visitorStory)}</p>` : ""}
+    ${doc.commercialCost ? `<p><strong>What this costs you.</strong> ${esc(doc.commercialCost)}</p>` : ""}
+    ${doc.ifNothingChanges ? `<p><strong>If nothing changes.</strong> ${esc(doc.ifNothingChanges)}</p>` : ""}
+    ${
+      doc.uncomfortableQuestions?.length
+        ? `<h2>Questions worth sitting with</h2>${ul(doc.uncomfortableQuestions)}`
+        : ""
+    }
     ${doc.whatsWorking?.length ? `<h2>2. What is already working</h2>${ul(doc.whatsWorking)}` : ""}
     <h2>3. Website / conversion review</h2>
     ${conv || "<p>Public pages were limited; only verified observations are listed below.</p>"}
@@ -405,7 +453,14 @@ export async function buildAuditDocx(doc: AuditDocument): Promise<Buffer> {
           }),
           p(`Prepared for ${doc.preparedFor || doc.company}${doc.website ? ` · ${doc.website}` : ""} · ${new Date(doc.date).toLocaleDateString()}`),
           p("1. Executive summary", HeadingLevel.HEADING_1),
+          p(doc.hookQuestion || doc.executiveSummary),
           p(doc.executiveSummary),
+          ...(doc.visitorStory ? [p(doc.visitorStory)] : []),
+          ...(doc.commercialCost ? [p(`What this costs you. ${doc.commercialCost}`)] : []),
+          ...(doc.ifNothingChanges ? [p(`If nothing changes. ${doc.ifNothingChanges}`)] : []),
+          ...(doc.uncomfortableQuestions?.length
+            ? [p("Questions worth sitting with", HeadingLevel.HEADING_1), ...bullets(doc.uncomfortableQuestions)]
+            : []),
           p("2. Website / conversion review", HeadingLevel.HEADING_1),
           ...doc.conversion.flatMap((c) => [p(c.heading, HeadingLevel.HEADING_2), p(c.body)]),
           p("3. Lead follow-up opportunities", HeadingLevel.HEADING_1),

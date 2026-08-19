@@ -149,6 +149,9 @@ export type AuditDocument = {
   date: string;
   title: string;
   executiveSummary: string;
+  hookQuestion?: string;
+  visitorStory?: string;
+  uncomfortableQuestions?: string[];
   whatsWorking?: string[];
   conversion: { heading: string; body: string }[];
   followUp: string[];
@@ -159,6 +162,7 @@ export type AuditDocument = {
   thirtyDayPlan?: string[];
   conversationAngle?: string;
   commercialCost?: string;
+  ifNothingChanges?: string;
   nextStep: { offer: string; why: string };
   notObserved: string[];
 };
