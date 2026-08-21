@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type KeyboardEvent, type MouseEvent } from "react";
 import { toLinkedinUrl } from "@/lib/linkedin-url";
 
+/** Never renders an <a> — safe inside Next.js Link / card rows. */
 export function CopyLinkedin({ url, compact }: { url?: string | null; compact?: boolean }) {
   const href = toLinkedinUrl(url);
   const [copied, setCopied] = useState(false);
@@ -19,18 +20,26 @@ export function CopyLinkedin({ url, compact }: { url?: string | null; compact?: 
     }
   }
 
+  function openLinkedin(e: MouseEvent | KeyboardEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    window.open(href, "_blank", "noopener,noreferrer");
+  }
+
   return (
     <div className={`flex min-w-0 items-center gap-1 ${compact ? "" : ""}`}>
-      <a
-        href={href}
-        target="_blank"
-        rel="noreferrer"
-        className="max-w-[160px] truncate text-accent hover:underline"
+      <span
+        role="link"
+        tabIndex={0}
+        className="max-w-[160px] cursor-pointer truncate text-accent hover:underline"
         title={href}
-        onClick={(e) => e.stopPropagation()}
+        onClick={openLinkedin}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") openLinkedin(e);
+        }}
       >
         {label}
-      </a>
+      </span>
       <button
         type="button"
         className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground hover:bg-muted hover:text-foreground"

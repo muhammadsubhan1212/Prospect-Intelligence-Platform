@@ -73,31 +73,28 @@ export default function OperatorDeskPage() {
       <h2 className="mt-8 text-lg font-medium">Queue</h2>
       <div className="mt-3 space-y-2">
         {(dash.queue.length ? dash.queue : dash.leads).map((l) => (
-          <Link key={l.id} href={`/operator/${params.operatorId}/leads/${l.id}`}>
-            <Card className="flex items-center justify-between gap-3 p-4 hover:bg-muted/40">
-              <div className="min-w-0">
-                <div className="font-medium">{l.name}</div>
+          <Card key={l.id} className="flex items-center justify-between gap-3 p-4 hover:bg-muted/40">
+            <div className="min-w-0">
+              <Link href={`/operator/${params.operatorId}/leads/${l.id}`} className="block">
+                <div className="font-medium hover:underline">{l.name}</div>
                 <div className="text-sm text-muted-foreground">
                   {l.company}
                   {l.title ? ` · ${l.title}` : ""}
                 </div>
-                <div
-                  className="mt-1"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                  }}
-                >
-                  <CopyLinkedin url={l.linkedin} compact />
-                </div>
+              </Link>
+              <div className="mt-1">
+                <CopyLinkedin url={l.linkedin} compact />
               </div>
-              <div className="flex flex-wrap justify-end gap-1">
-                {(l.statuses?.length ? l.statuses : [l.status]).filter(Boolean).map((st) => (
-                  <StatusBadge key={st} status={st} />
-                ))}
-              </div>
-            </Card>
-          </Link>
+            </div>
+            <Link
+              href={`/operator/${params.operatorId}/leads/${l.id}`}
+              className="flex flex-wrap justify-end gap-1"
+            >
+              {(l.statuses?.length ? l.statuses : [l.status]).filter(Boolean).map((st) => (
+                <StatusBadge key={st} status={st} />
+              ))}
+            </Link>
+          </Card>
         ))}
         {!dash.leads.length ? <p className="text-sm text-muted-foreground">No leads assigned yet.</p> : null}
       </div>

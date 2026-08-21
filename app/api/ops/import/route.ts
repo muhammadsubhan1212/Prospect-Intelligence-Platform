@@ -14,6 +14,8 @@ export async function POST(req: Request) {
         records?: Record<string, string>[];
         importId?: string;
         partLabel?: string;
+        sourceTotalRows?: number;
+        expectedParts?: number;
       };
       if (!body.filename || !body.headers?.length || !body.records) {
         return jsonError("filename, headers, and records are required");
@@ -24,6 +26,8 @@ export async function POST(req: Request) {
         records: body.records,
         importId: body.importId,
         partLabel: body.partLabel,
+        sourceTotalRows: body.sourceTotalRows,
+        expectedParts: body.expectedParts,
       });
       return jsonOk(result);
     }

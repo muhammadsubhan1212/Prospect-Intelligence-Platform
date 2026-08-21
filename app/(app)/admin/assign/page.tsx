@@ -6,10 +6,18 @@ import { OpsNav } from "@/components/ops/ops-nav";
 
 type Batch = { id: string; createdAt: string; count: number; remaining: number };
 type Operator = { id: string; name: string; active: boolean; assignedCount?: number; batches?: Batch[] };
+type ImportFile = {
+  id: string;
+  filename: string;
+  availableCount: number;
+  leadCount: number;
+};
 
 export default function AdminAssignPage() {
   const [operators, setOperators] = useState<Operator[]>([]);
+  const [files, setFiles] = useState<ImportFile[]>([]);
   const [operatorId, setOperatorId] = useState("");
+  const [importId, setImportId] = useState("");
   const [count, setCount] = useState("50");
   const [preview, setPreview] = useState<{ available: number; requested: number; willAssign: number } | null>(null);
   const [result, setResult] = useState("");
@@ -23,12 +31,20 @@ export default function AdminAssignPage() {
     setOperators((d.operators || []).filter((o: Operator) => o.active));
   }
 
+  async function loadFiles() {
+    const res = await fetch("/api/ops/imports");
+    const d = await res.json();
+    setFiles((d.imports as ImportFile[]) || []);
+  }
+
   useEffect(() => {
-    void loadOperators();
+    void Promise.all([loadOperators(), loadFiles()]);
   }, []);
 
   async function refreshPreview() {
-    const res = await fetch(`/api/ops/allocate?count=${encodeURIComponent(count || "0")}`);
+    const params = new URLSearchParams({ count: count || "0" });
+    if (importId) params.set("importId", importId);
+    const res = await fetch(`/api/ops/allocate?${params}`);
     const data = await res.json();
     setPreview(data);
   }
@@ -36,9 +52,10 @@ export default function AdminAssignPage() {
   useEffect(() => {
     void refreshPreview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [count]);
+  }, [count, importId]);
 
   const selected = operators.find((o) => o.id === operatorId);
+  const selectedFile = files.find((f) => f.id === importId);
 
   async function resetBatch(body: Record<string, unknown>, key: string, confirmText: string) {
     if (!confirm(confirmText)) return;
@@ -57,7 +74,7 @@ export default function AdminAssignPage() {
         setResult(
           `Reset ${data.reset} lead${data.reset === 1 ? "" : "s"}. They stay in the master pool and can be assigned again.`
         );
-        await Promise.all([refreshPreview(), loadOperators()]);
+        await Promise.all([refreshPreview(), loadOperators(), loadFiles()]);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -74,13 +91,18 @@ export default function AdminAssignPage() {
       const res = await fetch("/api/ops/allocate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ operatorId, count: Number(count) }),
+        body: JSON.stringify({
+          operatorId,
+          count: Number(count),
+          importId: importId || undefined,
+        }),
       });
       const data = await res.json();
       if (data.error) setError(data.error);
       else {
-        setResult(`Assigned ${data.count} leads in ${data.batchId} to ${data.operatorName}.`);
-        await Promise.all([refreshPreview(), loadOperators()]);
+        const from = selectedFile ? ` from “${selectedFile.filename}”` : " from the master pool";
+        setResult(`Assigned ${data.count} unique leads${from} in ${data.batchId} to ${data.operatorName}.`);
+        await Promise.all([refreshPreview(), loadOperators(), loadFiles()]);
       }
     } catch (e) {
       setError(String(e));
@@ -94,7 +116,7 @@ export default function AdminAssignPage() {
       <OpsNav />
       <h1 className="text-2xl font-semibold tracking-tight">Assign work</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        New batches take leads that are not currently allocated. Reset a previous batch below to put those leads back in the pool.
+        Assign unique unallocated leads from a specific uploaded CSV file, or from the whole master pool.
       </p>
       {error ? <p className="mt-3 text-sm text-danger">{error}</p> : null}
       {result ? <p className="mt-3 text-sm text-success">{result}</p> : null}
@@ -115,12 +137,28 @@ export default function AdminAssignPage() {
           </select>
         </label>
         <label className="block text-sm">
-          How many leads
+          From data file
+          <select
+            className="mt-1 h-10 w-full rounded-lg border border-border bg-card px-3 text-sm"
+            value={importId}
+            onChange={(e) => setImportId(e.target.value)}
+          >
+            <option value="">All files (whole pool)</option>
+            {files.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.filename} · {f.availableCount} available / {f.leadCount} total
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block text-sm">
+          How many unique leads
           <Input className="mt-1" type="number" min={1} value={count} onChange={(e) => setCount(e.target.value)} />
         </label>
         {preview ? (
           <p className="text-sm text-muted-foreground">
-            Available for outreach: {preview.available}. This batch will take {preview.willAssign}.
+            Available in {selectedFile ? `“${selectedFile.filename}”` : "pool"}: {preview.available}. This batch will
+            take {preview.willAssign}.
           </p>
         ) : null}
         <Button onClick={() => void assign()} disabled={!operatorId || busy}>
@@ -138,13 +176,22 @@ export default function AdminAssignPage() {
             size="sm"
             variant="danger"
             disabled={!!resetting || !selected.assignedCount}
-            onClick={() => void resetBatch({ operatorId: selected.id, allForOperator: true }, `${selected.id}-all`, `Reset all leads currently assigned to ${selected.name}?`)}
+            onClick={() =>
+              void resetBatch(
+                { operatorId: selected.id, allForOperator: true },
+                `${selected.id}-all`,
+                `Reset all leads currently assigned to ${selected.name}?`
+              )
+            }
           >
             {resetting === `${selected.id}-all` ? "Resetting…" : "Reset all assigned"}
           </Button>
           <ul className="space-y-2">
             {(selected.batches || []).map((b) => (
-              <li key={b.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm">
+              <li
+                key={b.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm"
+              >
                 <div>
                   <div>
                     {b.count} assigned · {b.remaining} still active

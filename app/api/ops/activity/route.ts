@@ -11,6 +11,8 @@ export async function GET(req: Request) {
       userId: url.searchParams.get("userId") || undefined,
       type: url.searchParams.get("type") || undefined,
       q: url.searchParams.get("q") || undefined,
+      from: url.searchParams.get("from") || undefined,
+      to: url.searchParams.get("to") || undefined,
       page: Number(url.searchParams.get("page") || 1),
       pageSize: Number(url.searchParams.get("pageSize") || 50),
     };

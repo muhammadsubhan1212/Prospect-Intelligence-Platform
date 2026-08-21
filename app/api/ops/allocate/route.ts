@@ -7,7 +7,8 @@ export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const count = Number(url.searchParams.get("count") || 0);
-    return jsonOk(await previewAllocation(count));
+    const importId = url.searchParams.get("importId") || undefined;
+    return jsonOk(await previewAllocation(count, importId));
   } catch (err) {
     return jsonError(err instanceof Error ? err.message : String(err), 500);
   }
@@ -21,6 +22,7 @@ export async function POST(req: Request) {
       leadIds?: string[];
       dailyTarget?: number;
       reassign?: boolean;
+      importId?: string;
     };
     if (!body.operatorId) return jsonError("operatorId is required");
     const result = await allocateLeads({
@@ -29,6 +31,7 @@ export async function POST(req: Request) {
       leadIds: body.leadIds,
       dailyTarget: body.dailyTarget,
       reassign: body.reassign,
+      importId: body.importId,
     });
     return jsonOk(result);
   } catch (err) {

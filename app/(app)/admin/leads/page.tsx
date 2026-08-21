@@ -38,6 +38,9 @@ type ImportFile = {
   leadCount: number;
   allocatedCount: number;
   availableCount: number;
+  uploadedParts?: string[];
+  sourceTotalRows?: number;
+  expectedParts?: number;
 };
 
 export default function AdminLeadsPage() {
@@ -212,11 +215,36 @@ export default function AdminLeadsPage() {
       const text = await file.text();
       const plan = splitCsvIntoParts(file.name, text);
       if (!plan.totalRows) throw new Error("No data rows found. Save as CSV (not Excel) and try again.");
-      setSplit(plan);
-      setBatchImportId("");
-      setResult(
-        `${file.name}: ${plan.totalRows} rows split into ${plan.parts.length} part${plan.parts.length === 1 ? "" : "s"} (L1${plan.parts.length > 1 ? `–L${plan.parts.length}` : ""}). Upload each part separately.`
-      );
+
+      const importsRes = await fetch("/api/ops/imports");
+      const importsData = await readJson(importsRes);
+      const latestFiles = (importsData.imports as ImportFile[]) || [];
+      setFiles(latestFiles);
+
+      const key = file.name.trim().toLowerCase();
+      const existing = latestFiles.find((f) => f.filename.trim().toLowerCase() === key);
+      const done = new Set(existing?.uploadedParts || []);
+      const resumed: SplitPlan = {
+        ...plan,
+        parts: plan.parts.map((p) => ({ ...p, uploaded: done.has(p.label) })),
+      };
+      setSplit(resumed);
+      setBatchImportId(existing?.id || "");
+      if (existing?.id) setImportId(existing.id);
+
+      const already = resumed.parts.filter((p) => p.uploaded).map((p) => p.label);
+      const remaining = resumed.parts.filter((p) => !p.uploaded).map((p) => p.label);
+      if (existing && already.length) {
+        setResult(
+          `Resuming “${file.name}” in the existing folder. Already uploaded: ${already.join(", ")} — will not upload again. Remaining: ${
+            remaining.length ? remaining.join(", ") : "none"
+          }.`
+        );
+      } else {
+        setResult(
+          `${file.name}: ${plan.totalRows} rows split into ${plan.parts.length} part${plan.parts.length === 1 ? "" : "s"} (L1${plan.parts.length > 1 ? `–L${plan.parts.length}` : ""}). Upload each part separately.`
+        );
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setSplit(null);
@@ -242,6 +270,8 @@ export default function AdminLeadsPage() {
           records: part.records,
           importId: batchImportId || undefined,
           partLabel: part.label,
+          sourceTotalRows: split.totalRows,
+          expectedParts: split.parts.length,
         }),
       });
       const data = await readJson(res);
@@ -256,9 +286,13 @@ export default function AdminLeadsPage() {
         ...split,
         parts: split.parts.map((p) => (p.id === partId ? { ...p, uploaded: true } : p)),
       });
-      setResult(
-        `${part.label} (rows ${part.rowFrom}–${part.rowTo}) imported → ${data.newLeads} new, ${data.alreadyExisting} already in pool, ${data.invalidRows} invalid.`
-      );
+      if (data.alreadyUploaded || data.skippedPart) {
+        setResult(`${part.label} was already in this folder — skipped re-upload.`);
+      } else {
+        setResult(
+          `${part.label} (rows ${part.rowFrom}–${part.rowTo}) imported → ${data.newLeads} new, ${data.alreadyExisting} already in pool, ${data.invalidRows} invalid.`
+        );
+      }
       await refresh(1);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -361,7 +395,8 @@ export default function AdminLeadsPage() {
               </h2>
               <p className="mt-1 text-sm text-muted-foreground">
                 {split.totalRows} rows in {split.parts.length} part{split.parts.length === 1 ? "" : "s"}. Each part stays
-                under Vercel’s upload limit. Upload the ones you want, in any order.
+                under Vercel’s upload limit. Already-uploaded parts stay in the same file folder and are skipped on
+                resume.
               </p>
             </div>
             <Button type="button" variant="ghost" size="sm" onClick={() => { setSplit(null); setBatchImportId(""); }}>
@@ -380,7 +415,7 @@ export default function AdminLeadsPage() {
                 {uploadingPart === p.id
                   ? `Uploading ${p.label}…`
                   : p.uploaded
-                    ? `${p.label} uploaded`
+                    ? `${p.label} already uploaded`
                     : `${p.label} · rows ${p.rowFrom}–${p.rowTo}`}
               </Button>
             ))}

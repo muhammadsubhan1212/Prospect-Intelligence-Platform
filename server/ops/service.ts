@@ -38,7 +38,15 @@ import {
   withOpsLock,
   writeOpsFile,
 } from "./store";
-import type { Activity, ActivityType, AllocationRecord, LeadStatus, MasterLead, Operator } from "./types";
+import type {
+  Activity,
+  ActivityType,
+  AllocationRecord,
+  ImportRecord,
+  LeadStatus,
+  MasterLead,
+  Operator,
+} from "./types";
 import { buildAuditDocument, renderAuditHtml } from "./audit";
 import { loadBrand } from "./brand";
 
@@ -198,6 +206,24 @@ export async function importMasterCsv(file: { name: string; arrayBuffer: () => P
   });
 }
 
+function normalizeImportFilename(name: string) {
+  return name.trim().toLowerCase();
+}
+
+/** Prefer an existing folder with the same filename so L-parts can resume. */
+function findImportForResume(
+  imports: ImportRecord[],
+  filename: string,
+  importId?: string
+): ImportRecord | undefined {
+  if (importId) {
+    const byId = imports.find((i) => i.id === importId);
+    if (byId) return byId;
+  }
+  const key = normalizeImportFilename(filename);
+  return imports.find((i) => normalizeImportFilename(i.filename) === key);
+}
+
 /** Chunk-safe import used on Vercel (each part stays under the function payload limit). */
 export async function importMasterRecords(input: {
   filename: string;
@@ -206,6 +232,8 @@ export async function importMasterRecords(input: {
   importId?: string;
   storedPath?: string;
   partLabel?: string;
+  sourceTotalRows?: number;
+  expectedParts?: number;
 }) {
   return withOpsLock(async () => {
     const headers = input.headers || [];
@@ -214,8 +242,23 @@ export async function importMasterRecords(input: {
       throw new Error("Could not read CSV headers. Save the file as CSV (not Excel) and try again.");
     }
     const imports = await loadImports();
-    let rec = input.importId ? imports.imports.find((i) => i.id === input.importId) : undefined;
+    let rec = findImportForResume(imports.imports, input.filename, input.importId);
     const importId = rec?.id || input.importId || newImportId();
+    const partLabel = input.partLabel?.trim() || undefined;
+
+    if (rec && partLabel && (rec.uploadedParts || []).includes(partLabel)) {
+      return {
+        ...rec,
+        partLabel,
+        newLeads: 0,
+        alreadyExisting: 0,
+        invalidRows: 0,
+        duplicateSamples: [] as { row: number; email?: string; company?: string; matchedId: string }[],
+        alreadyUploaded: true as const,
+        skippedPart: true as const,
+      };
+    }
+
     const leadsFile = await loadLeads();
     const stats = ingestRecords(records, headers, input.filename, importId, leadsFile);
     await saveLeads(leadsFile);
@@ -225,6 +268,7 @@ export async function importMasterRecords(input: {
       rec.newLeads += stats.newLeads;
       rec.alreadyExisting += stats.alreadyExisting;
       rec.invalidRows += stats.invalidRows;
+      if (input.filename?.trim()) rec.filename = input.filename.trim();
     } else {
       rec = {
         id: importId,
@@ -235,23 +279,37 @@ export async function importMasterRecords(input: {
         alreadyExisting: stats.alreadyExisting,
         invalidRows: stats.invalidRows,
         storedPath: input.storedPath,
+        uploadedParts: [],
       };
       imports.imports.unshift(rec);
     }
+
+    if (typeof input.sourceTotalRows === "number" && input.sourceTotalRows > 0) {
+      rec.sourceTotalRows = input.sourceTotalRows;
+    }
+    if (typeof input.expectedParts === "number" && input.expectedParts > 0) {
+      rec.expectedParts = input.expectedParts;
+    }
+    if (partLabel) {
+      const parts = new Set(rec.uploadedParts || []);
+      parts.add(partLabel);
+      rec.uploadedParts = [...parts].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    }
+
     await saveImports(imports);
     await logActivity({
       type: "lead_imported",
       metadata: {
         importId,
         filename: input.filename,
-        partLabel: input.partLabel,
+        partLabel,
         newLeads: stats.newLeads,
         alreadyExisting: stats.alreadyExisting,
         invalidRows: stats.invalidRows,
         totalRows: records.length,
       },
     });
-    return { ...rec, ...stats, partLabel: input.partLabel };
+    return { ...rec, ...stats, partLabel, alreadyUploaded: false as const, skippedPart: false as const };
   });
 }
 
@@ -358,11 +416,27 @@ export async function listImports() {
   const { imports } = await loadImports();
   const { leads } = await loadLeads();
   const { allocations } = await loadAllocations();
+  const { activities } = await loadActivities();
   const taken = activeTaken(allocations);
+
+  const partsFromActivity = new Map<string, Set<string>>();
+  for (const a of activities) {
+    if (a.type !== "lead_imported") continue;
+    const importId = typeof a.metadata?.importId === "string" ? a.metadata.importId : "";
+    const partLabel = typeof a.metadata?.partLabel === "string" ? a.metadata.partLabel : "";
+    if (!importId || !partLabel) continue;
+    const set = partsFromActivity.get(importId) || new Set<string>();
+    set.add(partLabel);
+    partsFromActivity.set(importId, set);
+  }
+
   return imports.map((imp) => {
     const inFile = leads.filter((l) => l.importId === imp.id);
+    const mergedParts = new Set([...(imp.uploadedParts || []), ...(partsFromActivity.get(imp.id) || [])]);
+    const uploadedParts = [...mergedParts].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     return {
       ...imp,
+      uploadedParts,
       leadCount: inFile.length,
       allocatedCount: inFile.filter((l) => taken.has(l.id)).length,
       availableCount: inFile.filter((l) => !taken.has(l.id)).length,
@@ -723,13 +797,19 @@ export async function getOperator(id: string) {
   return operators.find((o) => o.id === id) || null;
 }
 
-export async function previewAllocation(count: number) {
+export async function previewAllocation(count: number, importId?: string) {
   const { leads } = await loadLeads();
   const { allocations } = await loadAllocations();
   const taken = activeTaken(allocations);
-  const available = leads.filter((l) => !taken.has(l.id)).length;
+  const pool = importId ? leads.filter((l) => l.importId === importId) : leads;
+  const available = pool.filter((l) => !taken.has(l.id)).length;
   const n = Math.max(0, count);
-  return { available, requested: n, willAssign: Math.min(n, available) };
+  return {
+    available,
+    requested: n,
+    willAssign: Math.min(n, available),
+    importId: importId || null,
+  };
 }
 
 export async function allocateLeads(input: {
@@ -738,6 +818,7 @@ export async function allocateLeads(input: {
   leadIds?: string[];
   dailyTarget?: number;
   reassign?: boolean;
+  importId?: string;
 }) {
   return withOpsLock(async () => {
     const { operators } = await loadOperators();
@@ -756,6 +837,9 @@ export async function allocateLeads(input: {
       for (const id of input.leadIds) {
         const lead = leadsFile.leads.find((l) => l.id === id);
         if (!lead) throw new Error(`Lead not found: ${id}`);
+        if (input.importId && lead.importId !== input.importId) {
+          throw new Error(`Lead is not in the selected file: ${lead.company || lead.name}`);
+        }
         if (taken.has(id) && !input.reassign) {
           throw new Error(`Already allocated for outreach: ${lead.company || lead.name}`);
         }
@@ -763,8 +847,17 @@ export async function allocateLeads(input: {
       }
     } else {
       const n = Math.max(1, Math.min(500, input.count || 0));
-      selected = leadsFile.leads.filter((l) => !taken.has(l.id)).slice(0, n);
-      if (!selected.length) throw new Error("No unallocated leads remain in the master pool");
+      const pool = input.importId
+        ? leadsFile.leads.filter((l) => l.importId === input.importId && !taken.has(l.id))
+        : leadsFile.leads.filter((l) => !taken.has(l.id));
+      selected = pool.slice(0, n);
+      if (!selected.length) {
+        throw new Error(
+          input.importId
+            ? "No unallocated unique leads remain in this file"
+            : "No unallocated leads remain in the master pool"
+        );
+      }
     }
 
     for (const lead of selected) {
@@ -785,11 +878,11 @@ export async function allocateLeads(input: {
           currentUserId: op.id,
         });
         taken.add(lead.id);
-        await logActivity({ type: "lead_assigned", leadId: lead.id, userId: op.id, timestamp: ts, metadata: { batchId } });
+        await logActivity({ type: "lead_assigned", leadId: lead.id, userId: op.id, timestamp: ts, metadata: { batchId, importId: lead.importId } });
       } else {
         const rec = allocFile.allocations.find((a) => a.leadId === lead.id);
         if (rec) rec.currentUserId = op.id;
-        await logActivity({ type: "lead_reassigned", leadId: lead.id, userId: op.id, timestamp: ts, metadata: { batchId } });
+        await logActivity({ type: "lead_reassigned", leadId: lead.id, userId: op.id, timestamp: ts, metadata: { batchId, importId: lead.importId } });
       }
     }
 
@@ -803,7 +896,14 @@ export async function allocateLeads(input: {
     });
     await saveLeads(leadsFile);
     await saveAllocations(allocFile);
-    return { batchId, operatorId: op.id, operatorName: op.name, count: selected.length, leadIds: selected.map((l) => l.id) };
+    return {
+      batchId,
+      operatorId: op.id,
+      operatorName: op.name,
+      count: selected.length,
+      leadIds: selected.map((l) => l.id),
+      importId: input.importId || null,
+    };
   });
 }
 
@@ -811,12 +911,33 @@ export async function reassignLead(leadId: string, operatorId: string) {
   return allocateLeads({ operatorId, leadIds: [leadId], reassign: true });
 }
 
-export async function listActivityThreads(opts: { userId?: string; type?: string; q?: string; page?: number; pageSize?: number }) {
+/** Admin/system events — not operator outreach work for Activity "today" stats. */
+const NON_WORK_ACTIVITY = new Set([
+  "lead_imported",
+  "lead_assigned",
+  "lead_reassigned",
+  "lead_reset",
+  "lead_deleted",
+  "import_deleted",
+]);
+
+export async function listActivityThreads(opts: {
+  userId?: string;
+  type?: string;
+  q?: string;
+  from?: string;
+  to?: string;
+  page?: number;
+  pageSize?: number;
+}) {
   const { activities } = await loadActivities();
   const { leads } = await loadLeads();
   const { operators } = await loadOperators();
   const leadMap = new Map(leads.map((l) => [l.id, l]));
   const opMap = new Map(operators.map((o) => [o.id, o.name]));
+  const fromMs = opts.from ? Date.parse(opts.from) : NaN;
+  const toMs = opts.to ? Date.parse(opts.to) : NaN;
+  const hasRange = Number.isFinite(fromMs) && Number.isFinite(toMs);
 
   const groups = new Map<
     string,
@@ -832,6 +953,11 @@ export async function listActivityThreads(opts: { userId?: string; type?: string
 
   for (const a of activities) {
     if (!a.userId || !a.leadId) continue;
+    if (NON_WORK_ACTIVITY.has(a.type)) continue;
+    if (hasRange) {
+      const t = Date.parse(a.timestamp);
+      if (!Number.isFinite(t) || t < fromMs || t >= toMs) continue;
+    }
     const key = `${a.userId}::${a.leadId}`;
     const lead = leadMap.get(a.leadId);
     const existing = groups.get(key);
@@ -852,6 +978,7 @@ export async function listActivityThreads(opts: { userId?: string; type?: string
   let threads = [...groups.values()].map((g) => {
     const events = [...g.events].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     const last = events[events.length - 1];
+    const types = [...new Set(events.map((e) => e.type))];
     return {
       id: `${g.operatorId}::${g.leadId}`,
       operatorId: g.operatorId,
@@ -862,7 +989,10 @@ export async function listActivityThreads(opts: { userId?: string; type?: string
       actionCount: events.length,
       lastType: last?.type || "",
       lastAt: last?.timestamp || "",
-      types: [...new Set(events.map((e) => e.type))],
+      types,
+      opened: types.some((t) => t === "lead_opened" || t === "email_opened"),
+      emailed: types.some((t) => t === "email_sent" || t === "email_opened"),
+      called: types.some((t) => t === "called" || t === "call_clicked" || t === "call_no_answer"),
       reset: events.some((e) => e.type === "lead_reset" || Boolean(e.metadata?.reset)),
       events: events.map((a) => ({
         id: a.id,
@@ -883,6 +1013,75 @@ export async function listActivityThreads(opts: { userId?: string; type?: string
     );
   }
 
+  const summary = {
+    threads: threads.length,
+    opened: threads.filter((t) => t.opened).length,
+    emailed: threads.filter((t) => t.emailed).length,
+    called: threads.filter((t) => t.called).length,
+    actions: threads.reduce((n, t) => n + t.actionCount, 0),
+  };
+
+  const byOperatorMap = new Map<
+    string,
+    { operatorId: string; operatorName: string; threads: number; opened: number; emailed: number; called: number; actions: number }
+  >();
+  for (const t of threads) {
+    const cur = byOperatorMap.get(t.operatorId) || {
+      operatorId: t.operatorId,
+      operatorName: t.operatorName,
+      threads: 0,
+      opened: 0,
+      emailed: 0,
+      called: 0,
+      actions: 0,
+    };
+    cur.threads += 1;
+    cur.actions += t.actionCount;
+    if (t.opened) cur.opened += 1;
+    if (t.emailed) cur.emailed += 1;
+    if (t.called) cur.called += 1;
+    byOperatorMap.set(t.operatorId, cur);
+  }
+  const byOperator = [...byOperatorMap.values()].sort((a, b) => b.actions - a.actions);
+
+  // Separate from work activity: leads admin assigned in this day window.
+  let assignedLeads = leads
+    .filter((l) => {
+      if (!l.assignedTo || !l.assignedAt) return false;
+      if (opts.userId && l.assignedTo !== opts.userId) return false;
+      if (!hasRange) return true;
+      const t = Date.parse(l.assignedAt);
+      return Number.isFinite(t) && t >= fromMs && t < toMs;
+    })
+    .map((l) => ({
+      leadId: l.id,
+      leadName: l.name,
+      company: l.company,
+      status: l.status,
+      operatorId: l.assignedTo as string,
+      operatorName: opMap.get(l.assignedTo as string) || l.assignedTo || "",
+      assignedAt: l.assignedAt as string,
+    }))
+    .sort((a, b) => b.assignedAt.localeCompare(a.assignedAt));
+
+  if (opts.q) {
+    const q = opts.q.toLowerCase();
+    assignedLeads = assignedLeads.filter((l) =>
+      [l.operatorName, l.leadName, l.company].join(" ").toLowerCase().includes(q)
+    );
+  }
+
+  const assignedByOperatorMap = new Map<string, { operatorId: string; operatorName: string; count: number }>();
+  for (const row of assignedLeads) {
+    const cur = assignedByOperatorMap.get(row.operatorId) || {
+      operatorId: row.operatorId,
+      operatorName: row.operatorName,
+      count: 0,
+    };
+    cur.count += 1;
+    assignedByOperatorMap.set(row.operatorId, cur);
+  }
+
   const page = Math.max(1, opts.page || 1);
   const pageSize = Math.min(200, Math.max(1, opts.pageSize || 50));
   const total = threads.length;
@@ -892,16 +1091,40 @@ export async function listActivityThreads(opts: { userId?: string; type?: string
     page,
     pageSize,
     totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    summary,
+    byOperator,
+    assigned: {
+      count: assignedLeads.length,
+      byOperator: [...assignedByOperatorMap.values()].sort((a, b) => b.count - a.count),
+      items: assignedLeads.slice(0, 200),
+    },
   };
 }
 
-export async function listActivities(opts: { userId?: string; type?: string; q?: string; page?: number; pageSize?: number }) {
+export async function listActivities(opts: {
+  userId?: string;
+  type?: string;
+  q?: string;
+  from?: string;
+  to?: string;
+  page?: number;
+  pageSize?: number;
+}) {
   const { activities } = await loadActivities();
   const { leads } = await loadLeads();
   const { operators } = await loadOperators();
   const leadMap = new Map(leads.map((l) => [l.id, l]));
   const opMap = new Map(operators.map((o) => [o.id, o.name]));
+  const fromMs = opts.from ? Date.parse(opts.from) : NaN;
+  const toMs = opts.to ? Date.parse(opts.to) : NaN;
+  const hasRange = Number.isFinite(fromMs) && Number.isFinite(toMs);
   let rows = [...activities].reverse();
+  if (hasRange) {
+    rows = rows.filter((a) => {
+      const t = Date.parse(a.timestamp);
+      return Number.isFinite(t) && t >= fromMs && t < toMs;
+    });
+  }
   if (opts.userId) rows = rows.filter((a) => a.userId === opts.userId);
   if (opts.type) rows = rows.filter((a) => a.type === opts.type);
   if (opts.q) {

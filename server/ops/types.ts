@@ -132,6 +132,11 @@ export type ImportRecord = {
   alreadyExisting: number;
   invalidRows: number;
   storedPath?: string;
+  /** L1, L2… parts already ingested into this folder (resume-safe). */
+  uploadedParts?: string[];
+  /** Original CSV row count when the split plan was first known. */
+  sourceTotalRows?: number;
+  expectedParts?: number;
 };
 
 export type FreeAudit = {
